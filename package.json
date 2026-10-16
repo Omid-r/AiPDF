@@ -1,0 +1,67 @@
+{
+  "name": "aipdf-editor",
+  "productName": "AiPDF Editor",
+  "version": "2.8.1",
+  "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance and an agentic AI bot",
+  "main": "src/main/main.js",
+  "author": "manjayofficial01-ui",
+  "license": "MIT",
+  "dependencies": {
+    "@cantoo/fontkit": "^2.0.12",
+    "@cantoo/pdf-lib": "^2.11.1",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "pdfjs-dist": "^4.10.38",
+    "regenerator-runtime": "^0.14.1",
+    "tesseract.js": "^5.1.1",
+    "tesseract.js-core": "^5.1.1"
+  },
+  "scripts": {
+    "test:ocr": "node scripts/ocr-test.mjs",
+    "test:ocr-server": "node scripts/ocr-server-test.mjs",
+    "test:ocr-packaged": "node scripts/ocr-diag.mjs",
+    "test:hand": "node scripts/hand-tool-test.mjs",
+    "test:menu": "node scripts/menu-test.mjs",
+    "test:key": "node scripts/key-test.mjs",
+    "test:text": "node scripts/text-tool-test.mjs",
+    "test:reflow": "node --max-old-space-size=1024 scripts/reflow-test.mjs",
+    "test:fonts": "node scripts/fontindex-test.mjs && node scripts/system-font-test.mjs",
+    "test:tools": "node scripts/tools-test.mjs",
+    "test:objects": "node scripts/object-edit-test.mjs",
+    "test:stirling": "node scripts/stirling-test.mjs",
+    "test:overlay": "node scripts/overlay-test.mjs",
+    "test:doctools": "node scripts/doctools-test.mjs",
+    "test:resize": "node scripts/resize-test.mjs",
+    "test:smoke": "node scripts/smoke-pdf.mjs",
+    "test:launch": "node scripts/launch-test.mjs",
+    "test:audit": "node scripts/audit-imports.mjs",
+    "dist": "electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.aipdf.editor",
+    "productName": "AiPDF Editor",
+    "files": [
+      "src/**",
+      "node_modules/**",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "vendor/tessdata", "to": "tessdata" }
+    ],
+    "asarUnpack": [
+      "**/tesseract.js-core/**"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "AiPDF-Editor-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "directories": {
+      "output": "dist-build"
+    }
+  }
+}

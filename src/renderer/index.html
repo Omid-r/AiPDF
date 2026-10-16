@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' http://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:*; worker-src 'self' blob: http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* https: http: data: blob:; font-src 'self' data:;" />
+<title>AiPDF Editor</title>
+<link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- ── Title bar (native window controls overlay the right side) ───────── -->
+  <header class="titlebar">
+    <div class="tb-left">
+      <div class="brand"><span class="brand-mark">A</span><span class="brand-name">AiPDF Editor</span><span class="brand-ver" id="brandVer"></span></div>
+    </div>
+    <div class="tb-tabs" id="tabStrip"></div>
+    <div class="tb-right">
+      <button class="chip" id="aiChip" title="AI status — click to configure">
+        <span class="dot"></span><span id="aiChipLabel">AI off</span>
+      </button>
+      <button class="icon-btn" id="btnTheme" title="Toggle dark mode (Ctrl+Shift+D)"></button>
+      <button class="icon-btn" id="btnPrefs" title="Preferences (Ctrl+,)"></button>
+      <button class="icon-btn" id="btnChromeToggle" title="Show / hide toolbars (Ctrl+F11)" hidden></button>
+      <span class="tb-spacer-native"></span>
+    </div>
+  </header>
+
+  <!-- ── Mode tabs + quick access ───────────────────────────────────────── -->
+  <div class="menubar">
+    <div class="quick">
+      <button class="qbtn" data-act="file:open" title="Open (Ctrl+O)"></button>
+      <button class="qbtn" data-act="file:save" title="Save (Ctrl+S)"></button>
+      <button class="qbtn" data-act="file:print" title="Print (Ctrl+P)"></button>
+      <span class="sep"></span>
+      <button class="qbtn" data-act="edit:undo" title="Undo (Ctrl+Z)"></button>
+      <button class="qbtn" data-act="edit:redo" title="Redo (Ctrl+Y)"></button>
+      <span class="sep"></span>
+      <!-- Hand and Select sit in the quick-access bar so the two universal
+           tools survive a collapsed ribbon, a hidden toolbar and every mode
+           tab. Hand is the "move the page" tool: Acrobat and Foxit keep it
+           reachable no matter what else is armed. -->
+      <button class="qbtn" data-tool="select" title="Select tool (V)"></button>
+      <button class="qbtn" data-tool="hand" title="Hand / move the page — or hold Space from any tool"></button>
+      <span class="sep"></span>
+      <button class="qbtn" data-act="view:pages" title="Pages"></button>
+      <button class="qbtn" data-act="view:comments" title="Comments"></button>
+      <button class="qbtn" data-act="view:ai" title="AI Assistant"></button>
+    </div>
+    <div class="modes" id="modeTabs" role="tablist" aria-label="Editor modes"></div>
+    <div class="mb-right">
+      <div class="findbar" id="findBar">
+        <input type="text" id="findInput" placeholder="Find in document…" spellcheck="false" />
+        <span class="find-count" id="findCount"></span>
+        <button class="tbtn" id="findPrev" title="Previous (Shift+Enter)"></button>
+        <button class="tbtn" id="findNext" title="Next (Enter)"></button>
+        <label class="chk"><input type="checkbox" id="findCase" /><span>Aa</span></label>
+        <label class="chk"><input type="checkbox" id="findWord" /><span>W</span></label>
+        <button class="tbtn" id="findClose" title="Close (Esc)"></button>
+      </div>
+      <button class="icon-btn" id="btnFind" title="Find (Ctrl+F)"></button>
+      <button class="icon-btn" id="btnPalette" title="Command palette (Ctrl+K)"></button>
+      <button class="icon-btn" id="btnRibbonToggle" title="Collapse the Ribbon (Ctrl+F1)"></button>
+    </div>
+  </div>
+
+  <!-- ── Contextual ribbon ──────────────────────────────────────────────── -->
+  <div class="ribbon" id="ribbon" role="toolbar" aria-label="Tools" aria-orientation="horizontal"></div>
+
+  <!-- ── Workspace ──────────────────────────────────────────────────────── -->
+  <main class="workspace" aria-label="Document workspace">
+    <nav class="rail" id="rail" aria-label="Panels"></nav>
+    <aside class="sidebar" id="sidebar" aria-label="Panel">
+      <div class="side-head">
+        <span class="side-title" id="sideTitle">Pages</span>
+        <button class="icon-btn sm" id="sideClose" aria-label="Hide panel" title="Hide panel"></button>
+      </div>
+      <div class="side-tools" id="sideTools"></div>
+      <div class="side-body" id="sideBody"></div>
+    </aside>
+
+    <section class="canvas-wrap" id="canvasWrap" aria-label="Document">
+      <div class="welcome" id="welcome">
+        <div class="welcome-inner">
+          <div class="welcome-logo"><span>A</span></div>
+          <h1>AiPDF Editor</h1>
+          <p class="tagline">View, edit and annotate PDFs — with an AI assistant that cites the exact passage it used.</p>
+          <div class="welcome-actions">
+            <button class="primary big" id="welcomeOpen">Open a PDF</button>
+            <button class="ghost big" id="welcomeNew">Create blank PDF</button>
+            <button class="ghost big" id="welcomeImages">Images → PDF</button>
+          </div>
+          <div class="welcome-recents" id="welcomeRecents"></div>
+          <div class="welcome-features" id="welcomeFeatures"></div>
+          <p class="drop-hint">…or drag a PDF anywhere onto this window.</p>
+        </div>
+      </div>
+      <div class="pages" id="pagesScroll"><div class="pages-inner" id="pages"></div></div>
+
+      <!-- Empty workspace. The app boots straight into the editor shell rather
+           than a landing page; this is what the canvas shows until a document is
+           opened. The full Welcome/Recent screen is still available from
+           Help ▸ Start page. -->
+      <div class="empty-workspace hidden" id="emptyWorkspace">
+        <div class="ew-card">
+          <div class="ew-logo"><span>A</span></div>
+          <h2>AiPDF Editor</h2>
+          <p class="ew-hint">Open a PDF to begin — or start from scratch.</p>
+          <div class="ew-actions">
+            <button class="primary big" id="ewOpen">Open a PDF</button>
+            <button class="ghost big" id="ewNew">Create blank PDF</button>
+            <button class="ghost big" id="ewImages">Images → PDF</button>
+          </div>
+          <p class="ew-drop">…or drag a PDF anywhere onto this window.</p>
+        </div>
+      </div>
+
+      <!-- Rulers — created in markup, drawn and positioned by viewer.js.
+           The layer is absolutely positioned inside the scroller and translated
+           by the scroll offset, so it never takes flow space: the centred page
+           keeps its exact rendered position and `align-items: safe center`
+           still owns centring. Everything but the corner chip is pointer-
+           transparent, so the paper under a ruler stays clickable/draggable. -->
+      <div class="rulers" id="rulers">
+        <div class="ruler ruler-h" id="rulerH">
+          <canvas id="rulerHCanvas" aria-hidden="true"></canvas>
+          <span class="ruler-mark" id="rulerMarkH" aria-hidden="true"></span>
+        </div>
+        <div class="ruler ruler-v" id="rulerV">
+          <canvas id="rulerVCanvas" aria-hidden="true"></canvas>
+          <span class="ruler-mark" id="rulerMarkV" aria-hidden="true"></span>
+        </div>
+        <div class="ruler-corner">
+          <button type="button" class="ruler-chip" id="rulerToggle" aria-pressed="false" data-tip="Show rulers"></button>
+          <button type="button" class="ruler-chip ruler-unit" id="rulerUnit" data-tip="Measurement unit — click to change"></button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="context" id="context" aria-label="Properties">
+      <div class="ctx-head">
+        <span id="ctxTitle">Properties</span>
+        <button class="icon-btn sm" id="ctxClose" aria-label="Hide panel" title="Hide panel"></button>
+      </div>
+      <div class="ctx-body" id="ctxBody"></div>
+    </aside>
+  </main>
+
+  <!-- ── Status bar ─────────────────────────────────────────────────────── -->
+  <footer class="statusbar" id="statusbar" role="contentinfo" aria-label="Document status">
+    <span class="st-item" id="stPage">—</span>
+    <span class="st-sep"></span>
+    <span class="st-item" id="stDims">—</span>
+    <span class="st-sep"></span>
+    <span class="st-item" id="stMode">Select</span>
+    <span class="st-sep"></span>
+    <!-- Select + Hand are always one click away, on every ribbon tab — Acrobat
+         and Foxit keep these two tools reachable regardless of the active tool. -->
+    <div class="tool-pair" id="toolPair" role="group" aria-label="Select and Hand tools">
+      <button type="button" data-tool="select" title="Select tool (V)" aria-label="Select tool"></button>
+      <button type="button" data-tool="hand" title="Hand / pan — or hold Space to pan from any tool" aria-label="Hand tool"></button>
+    </div>
+    <span class="st-grow"></span>
+    <span class="st-item" id="stSecurity"></span>
+    <span class="st-err" id="stErr"></span>
+    <span class="st-item" id="stMeta"></span>
+    <span class="st-item st-save" id="stSave">No document</span>
+
+    <!-- Zoom lives in the info bar now; it used to float over the canvas and
+         duplicate the percentage the bar was already printing. -->
+    <div class="zoom-pill" id="zoomPill" role="group" aria-label="Zoom">
+      <button data-act="view:zoomOut" id="zpOut" aria-label="Zoom out"></button>
+      <select id="zoomSelect" aria-label="Zoom level"></select>
+      <button data-act="view:zoomIn" id="zpIn" aria-label="Zoom in"></button>
+      <button class="zp-fit" id="zpFit" data-act="view:fitPage" aria-label="Fit page" title="Fit page"></button>
+    </div>
+  </footer>
+</div>
+
+<!-- Floating layer: dialogs, popovers, toasts, signature pad, palette -->
+<div id="overlayRoot"></div>
+<div id="toastRoot" class="toast-root" role="status" aria-live="polite"></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

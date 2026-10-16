@@ -1,0 +1,9 @@
+node_modules/
+.smoke/
+.fixtures/
+.spike/
+dist*/
+.superpowers/
+.workbuddy-ai/
+*.log
+.DS_Store
