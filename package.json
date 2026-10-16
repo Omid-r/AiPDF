@@ -1,7 +1,7 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.8.1",
+  "version": "2.8.2",
   "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
@@ -34,13 +34,17 @@
     "test:smoke": "node scripts/smoke-pdf.mjs",
     "test:launch": "node scripts/launch-test.mjs",
     "test:audit": "node scripts/audit-imports.mjs",
+    "test:icon": "node scripts/icon-pack-test.mjs",
     "dist": "electron-builder --win --x64"
   },
   "build": {
     "appId": "com.aipdf.editor",
     "productName": "AiPDF Editor",
+    "icon": "assets/icon.ico",
     "files": [
       "src/**",
+      "assets/icon.ico",
+      "assets/icon.png",
       "node_modules/**",
       "package.json"
     ],
@@ -52,13 +56,17 @@
     ],
     "win": {
       "target": ["nsis"],
+      "icon": "assets/icon.ico",
       "artifactName": "AiPDF-Editor-${version}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     },
     "directories": {
       "output": "dist-build"

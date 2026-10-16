@@ -104,7 +104,10 @@ function createWindow(url, show = true) {
   const dark = initialDark();
   const skin = dark ? ATELIER.dark : ATELIER.light;
   // Resolve the icon relative to the app path so it works both in `npm start`
-  // (project root) and in the packaged asar (electron-builder copies assets/).
+  // (project root) and in the packaged asar. electron-builder does NOT copy
+  // assets/ on its own — `build.files` must list assets/icon.ico explicitly, or
+  // this path silently misses inside app.asar and the window falls back to the
+  // generic Electron icon. scripts/icon-pack-test.mjs guards that.
   const iconPath = path.join(app.getAppPath(), 'assets', 'icon.ico');
   const hasIcon = (() => { try { return require('node:fs').statSync(iconPath).size > 0; } catch { return false; } })();
   win = new BrowserWindow({
