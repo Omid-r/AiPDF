@@ -304,8 +304,21 @@ export async function exciseText(PL, doc, pageIndex, rects, opts = {}) {
   };
 
   const decode = async (obj) => {
-    if (!obj || !obj.contents) return null;
-    const raw = obj.contents instanceof Uint8Array ? obj.contents : new Uint8Array(obj.contents);
+    if (!obj) return null;
+    // Two stream shapes reach here, and missing the second one is silent:
+    //  - PDFRawStream — a page loaded from bytes, or a stream pdf-lib created
+    //    with context.flateStream() — exposes `.contents`.
+    //  - PDFContentStream — pdf-lib's OWN writer output — has no `.contents`
+    //    and must be asked via getContents().
+    // Because exciseText rewrites a page's stream with flateStream(), the
+    // second edit on a page reads back a different shape from the first; before
+    // this branch existed that edit found no text, refused to excise, and
+    // quietly fell back to covering.
+    const encoded = obj.contents instanceof Uint8Array ? obj.contents
+      : obj.contents ? Uint8Array.from(obj.contents)
+        : (typeof obj.getContents === 'function' ? obj.getContents() : null);
+    if (!encoded) return null;
+    const raw = encoded instanceof Uint8Array ? encoded : Uint8Array.from(encoded);
     const f = obj.dict?.get?.(PDFName.of('Filter'))?.toString() || '';
     // PDFRawStream.decode() hands back the still-compressed bytes, so a
     // FlateDecode stream has to be inflated by the caller-supplied function:

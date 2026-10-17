@@ -2228,6 +2228,17 @@ body.chrome-hidden .ribbon { display: none; }
 .editable-text-block.from-ocr { border-style: dashed; border-color: var(--warn-ink, #b8860b); }
 .editable-text-block.from-ocr:hover,
 .editable-text-block.from-ocr:focus-visible { background: rgba(184, 134, 11, .14); outline-color: var(--warn-ink, #b8860b); }
+/* Source-order number: the block's position in the page's own text order, so
+   two similar-looking runs can be told apart before a merge is confirmed. */
+.editable-text-block .block-order { position: absolute; top: -1px; left: -1px;
+  min-width: 13px; height: 13px; padding: 0 3px; border-radius: 2px 0 2px 0;
+  background: var(--accent); color: #fff; font-size: 9px; line-height: 13px;
+  text-align: center; pointer-events: none; font-variant-numeric: tabular-nums; }
+.editable-text-block.from-ocr .block-order { background: var(--warn-ink, #b8860b); }
+/* Threaded-story frames (Link frames): an ordered chain, never one rectangle. */
+.annLayer .story-frame { stroke-dasharray: 4 3; }
+.annLayer .textedit-story { pointer-events: none; }
+.annLayer .overset-badge text { dominant-baseline: auto; }
 
 /* "This page has no editable text" — the answer to a page that looked dead. */
 .editable-empty { position: absolute; left: 50%; top: 14%; transform: translateX(-50%);

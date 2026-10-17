@@ -21,7 +21,7 @@ Mapped from the capabilities that define the category leaders:
 | --- | --- | --- |
 | **View** | Fast pdf.js rendering, lazy page loading, text‑layer selection, thumbnails, bookmarks/outline, continuous & single‑page layouts, fit‑width/fit‑page, zoom, dark mode. | All leaders |
 | **Comment** | Highlight, underline, strike‑through, squiggly, sticky notes, shapes (rect/ellipse/line/arrow), free‑ink, text boxes & callouts, stamps, signatures, images, measurement. **Real PDF annotations** are written with appearance streams so they render in any reader. | Acrobat / Foxit |
-| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). The original text is **covered, never deleted** (see [Cover editing](#cover-editing-cover-not-delete)), and the replacement block can be **dragged anywhere** on the page. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
+| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
 | **Organize** | Insert/delete/rotate/extract/reorder pages, merge documents, split, insert blank pages or pages from another PDF. | PDFelement / Nitro |
 | **Forms** | Read & fill existing AcroForm fields, create new text/checkbox/radio/dropdown/signature fields, export values to JSON/CSV. | Acrobat / PDF‑XChange |
 | **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), and remove security. | Acrobat / Nitro |
@@ -64,37 +64,72 @@ space when the document is saved, so what you see is exactly what gets written.
 
 ---
 
-## Cover editing — cover, not delete
+## Object-owned editing — remove, don't cover
 
 The **Direct Editor** (the "Edit Text" tool, renamed to match Acrobat's Edit PDF
-model) groups a page's text into geometric blocks, lets you retype a block in
-place, and on save paints an **opaque wash over the original words** before
-drawing the replacement as ordinary selectable PDF text on top. The original
-content‑stream operators stay in the file — the edit hides them instead of
-deleting them.
+model) is built on an **object-owned, story-based** engine. Three things are kept
+separate, and that separation is what the whole design rests on:
 
-That tradeoff is deliberate. Deleting operators can corrupt pages the user never
-opened (text inside a shared Form XObject, neighbouring lines a rect only
-grazes); a wash cannot. The honest consequence: the covered text is still in
-the file, so search and copy‑paste in other readers can find words you can no
-longer see. **Cover editing is not redaction** — for true removal use the
-Redact tool with Sanitize.
+```
+ORIGINAL PDF   →   AUTHORING MODEL   →   LAYOUT MODEL   →   PDF WRITER
+source objects,    stories, styled      wrapping,          remove owned sources,
+text, fonts,       runs, confirmed      baselines,         insert replacements,
+geometry,          source ownership,    placements,        regenerate, save
+transforms         ordered frames       logical ranges,    candidate, reopen
+                                        overset status
+```
+
+**1. Ownership is explicit.** Grouping a page's text produces *proposals*, each
+carrying the source objects it would own. Nothing is owned until a commit records
+it (`sourceRefs`). The writer may remove the owned sources and only those — so a
+rect that merely grazes a neighbouring line cannot take it with it.
+
+**2. A save removes, it does not cover.** On export the writer **deletes the owned
+source operators** and inserts the replacement, so search, copy‑paste and a
+screen reader in any reader agree with what is on screen. A white cover is *not*
+a deletion: a screenshot looks right while the old, searchable words remain
+extractable underneath. `scripts/truthful-save-test.mjs` proves the difference
+with an independent extractor (pdf.js) — and asserts that a cover *would* fail
+the same check.
+
+A wash is now only a **fallback**, used when removal is genuinely impossible:
+a recognised scan (the original is ink in an image) or text inside a shared
+**Form XObject** (editing it in place would corrupt pages the user never opened).
+The fallback is recorded on the edit as `removal: 'cover'`, never silent.
+
+> This is still **not secure redaction.** A removed visible object does not prove
+> every copy in attachments, metadata or unused resources is gone — use the
+> Redact tool with Sanitize for confidentiality.
+
+**3. Stories can thread frames.** An edit may carry an **ordered chain of
+destination frames**, possibly on different pages. Text composes into frame 1 and
+continues from the exact logical position into frame 2 — the frames are never
+merged into one rectangle, because the area between them may hold an image or
+another column. Anything that does not fit the last frame is **overset**:
+reported, marked on the page, and never silently clipped.
 
 A committed block is a free object:
 
-- **Drag it anywhere** with the Select tool (or the Edit Text tool). The wash
-  over the original text stays put; only the replacement travels.
+- **Drag it anywhere** with the Select tool (or the Edit Text tool).
 - **Double‑click it** (wherever it now sits) to type into it again — re‑editing
   keeps the dragged position instead of teleporting the block home.
-- **Delete** (`Del`) drops the block and uncovers the original; every move is
-  undoable (`Ctrl+Z`).
-- Move → save → move → save cannot leave ghost copies: each drag records the
-  box it started from (last 8), and the writer washes those too.
+- **Delete** (`Del`) restores the original: export always reconstructs from the
+  original bytes, so removal is never cumulative and undo is exact.
+- Move → save → move → save cannot leave ghost copies: every export rebuilds
+  from the **original** bytes, so a previous replacement is never an input to
+  the next one. Each drag also records the box it started from (last 8) so the
+  app never offers your own past output back as an editable source block.
 
-Verified by `scripts/reflow-test.mjs` (content‑stream engine) and four rows of
-the `--parity-test` suite (edit → save → reopen → the original is covered, the
-replacement is present as real text, neighbouring text survives, and an edit
-over blank space still saves).
+The text‑block panel exposes the three explicit actions the design calls for —
+**Edit text** (a line), **Make paragraph with next block** (with an explicit
+join: space / line break / nothing), and **Continue on next page** (link frames) —
+plus a live composition readout of placed vs. overset characters.
+
+Verified by `scripts/story-test.mjs` (the authoring + layout model, 42 checks),
+`scripts/truthful-save-test.mjs` (removal vs. covering, 14 checks),
+`scripts/reflow-test.mjs` (the content‑stream primitive) and the `--parity-test`
+suite (edit → save → reopen → the original is **gone**, the replacement is
+present as real text, neighbouring text survives).
 
 ### Select & Hand — always available
 

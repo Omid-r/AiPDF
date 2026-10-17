@@ -4,6 +4,7 @@ import { uid, clamp, rgbToCss, readableOn, hexToRgb } from './util.js';
 import { renderStampPreviews } from './stamps.js';
 import { normalizeRect, HANDLE_CURSORS } from './geometry.js';
 import { textEditDrawBox, textEditWashes } from './textblocks.js';
+import { storyFromEdit, layoutStory } from './story.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const XHTMLNS = 'http://www.w3.org/1999/xhtml';
@@ -780,6 +781,41 @@ export function annotNode(a, page, s) {
   }
 }
 
+/* ── Overset badge + frame flow (story model UI) ─────────────────────────
+ *
+ * Overset is a first-class result of the layout model, not something the UI
+ * infers from a viewer clipping text out of view. When a story needs more room
+ * than its frames give, the remainder is reported here — the text is never
+ * discarded from the model.
+ */
+
+let measureCtx = null;
+function canvasMeasure(family, size) {
+  if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
+  measureCtx.font = `${size}px ${family || 'Helvetica'}, Helvetica, Arial, sans-serif`;
+  return (t) => measureCtx.measureText(String(t)).width;
+}
+
+function svgText(x, y, text, size = 10, fill = '#fff') {
+  const t = document.createElementNS(SVGNS, 'text');
+  t.setAttribute('x', x);
+  t.setAttribute('y', y);
+  t.setAttribute('font-size', String(size));
+  t.setAttribute('font-family', 'system-ui, sans-serif');
+  t.setAttribute('fill', fill);
+  t.textContent = text;
+  return t;
+}
+
+/** A small "overset" chip: the story needs more room than its frames give. */
+function oversetBadge(x, y, label = 'overset') {
+  const g = svgEl('g', { class: 'overset-badge', 'pointer-events': 'none' });
+  const w = 8 + label.length * 6;
+  g.appendChild(svgEl('rect', { x, y, width: w, height: 15, rx: 3, fill: '#d92d3f', opacity: 0.92 }));
+  g.appendChild(svgText(x + 5, y + 11, label, 10));
+  return g;
+}
+
 /* ── Page annotation layer ──────────────────────────────────────────────── */
 
 export function renderPageAnnotations(i) {
@@ -804,33 +840,103 @@ export function renderPageAnnotations(i) {
   }
 
   // Pending in-place text edits: show the result immediately.
-  // Cover model: the ORIGINAL footprint (coverRect) is washed with the
-  // background and never moves; the replacement text box is painted with the
-  // same wash behind its own glyphs and can be dragged anywhere — the writer
-  // (pdfwrite.js applyTextEdit) paints the same wash list, so the screen and
-  // the saved file agree.
+  // Object-owned model: the writer REMOVES the owned source operators and draws
+  // the replacement as ordinary page text, so on screen the edit is an overlay
+  // on the still-untouched source render. The wash below is the writer's cover
+  // FALLBACK made visible — it is only painted while removal is still unknown
+  // (before the first save) or when removal genuinely failed (a scan whose
+  // glyphs are pixels, text inside a shared Form XObject). Once a save has
+  // recorded `e.removal === 'excise'` the original is gone from the file, so the
+  // wash would only be a spurious opaque patch over the page's own background.
   for (const e of d.textEdits || []) {
     if (e.page !== i) continue;
-    // A Direct Editor commit owns a real text box annotation now — the box
-    // draws the text, so all this renders is the wash that hides the ORIGINAL
-    // run underneath. It goes in first so it paints *below* the annotation it
-    // belongs to; appended like the other edits it would cover its own box.
-    // The original text is never removed from the file, only hidden.
+    // A Direct Editor commit owns a real text box annotation on screen — the box
+    // draws the replacement text, so all this renders is the wash that hides the
+    // ORIGINAL run underneath. It goes in first so it paints *below* the
+    // annotation it belongs to; appended like the other edits it would cover its
+    // own box. The saved file removes the original rather than hiding it, and
+    // omits the paired box from the file (the text lives in the page content).
     if (e.boxId && d.annots.some((a) => a.id === e.boxId)) {
-      if (!e.bg) continue;
-      const cg = svgEl('g', { class: 'textedit textedit-cover', 'data-eid': e.id });
-      for (const w of [e.coverRect, ...(e.priorBoxes || [])]) {
-        if (!w) continue;
-        const b = (() => {
-          const c = [toCss(i, w[0], w[1]), toCss(i, w[2], w[3])];
-          return [Math.min(c[0].x, c[1].x), Math.min(c[0].y, c[1].y), Math.max(c[0].x, c[1].x), Math.max(c[0].y, c[1].y)];
-        })();
-        cg.appendChild(svgEl('rect', {
-          x: b[0], y: b[1], width: Math.max(1, b[2] - b[0]), height: Math.max(1, b[3] - b[1]),
-          fill: rgbToCss(e.bg, 1), stroke: 'none',
-        }));
+      const box = d.annots.find((a) => a.id === e.boxId);
+      if (e.bg && e.removal !== 'excise') {
+        const cg = svgEl('g', { class: 'textedit textedit-cover', 'data-eid': e.id });
+        for (const w of [e.coverRect, ...(e.priorBoxes || [])]) {
+          if (!w) continue;
+          const b = (() => {
+            const c = [toCss(i, w[0], w[1]), toCss(i, w[2], w[3])];
+            return [Math.min(c[0].x, c[1].x), Math.min(c[0].y, c[1].y), Math.max(c[0].x, c[1].x), Math.max(c[0].y, c[1].y)];
+          })();
+          cg.appendChild(svgEl('rect', {
+            x: b[0], y: b[1], width: Math.max(1, b[2] - b[0]), height: Math.max(1, b[3] - b[1]),
+            fill: rgbToCss(e.bg, 1), stroke: 'none',
+          }));
+        }
+        svg.insertBefore(cg, svg.firstChild);
       }
-      svg.insertBefore(cg, svg.firstChild);
+      // Overset marker: the frame cannot hold the whole story. Shown on the box
+      // rather than left for the user to discover in the saved file.
+      if (e.overset) {
+        const r = annotCssRect({ rect: box.rect });
+        const bg = svgEl('g', { class: 'textedit textedit-overset', 'data-eid': e.id });
+        bg.appendChild(oversetBadge(r[2] - 60, r[1] - 20, `+${e.overset.lines} line${e.overset.lines === 1 ? '' : 's'}`));
+        svg.appendChild(bg);
+      }
+      continue;
+    }
+
+    /* Threaded story: composed into an ordered chain of frames, possibly on
+       several pages. Each frame is outlined, its placements drawn, and a flow
+       arrow marks where the text continues — the frames are never merged into
+       one rectangle. */
+    if (Array.isArray(e.frames) && e.frames.length > 1) {
+      const story = storyFromEdit(e);
+      const layout = layoutStory(story, canvasMeasure(e.fontFamily, e.size || 11));
+      const g = svgEl('g', { class: 'textedit textedit-story', 'data-eid': e.id });
+      const fs = (e.size || 11) * s;
+      const leading = (e.lineHeight || (e.size || 11) * 1.2) * s;
+      for (const pl of layout.placements) {
+        if (pl.page !== i) continue;
+        const a2 = toCss(i, pl.rect[0], pl.rect[1]);
+        const b2 = toCss(i, pl.rect[2], pl.rect[3]);
+        const fb = [Math.min(a2.x, b2.x), Math.min(a2.y, b2.y), Math.max(a2.x, b2.x), Math.max(a2.y, b2.y)];
+        g.appendChild(svgEl('rect', {
+          class: 'story-frame', x: fb[0], y: fb[1], width: Math.max(1, fb[2] - fb[0]), height: Math.max(1, fb[3] - fb[1]),
+          fill: 'none', stroke: '#3b5bfd', 'stroke-width': 1, 'stroke-dasharray': '4 3',
+          // `all` (not `auto`): a threaded story carries no text box, so this
+          // outline is the only thing the user can click to re-open its panel.
+          // The rect has no fill, so `visiblePainted` would leave a hole in the
+          // middle — `all` makes the whole frame a hit target.
+          'pointer-events': 'all',
+        }));
+        const fo = svgEl('foreignObject', { x: fb[0], y: fb[1], width: Math.max(1, fb[2] - fb[0]), height: Math.max(1, fb[3] - fb[1]), overflow: 'visible' });
+        const div = document.createElementNS(XHTMLNS, 'div');
+        div.setAttribute('xmlns', XHTMLNS);
+        div.style.cssText = `width:100%;height:100%;margin:0;padding:0;overflow:visible;white-space:pre;`
+          + `font-family:${e.fontFamily || 'Helvetica'},Helvetica,Arial,sans-serif;font-size:${fs}px;line-height:${leading}px;`
+          + `color:${rgbToCss(e.color || [0, 0, 0], 1)};`;
+        div.textContent = pl.lines.map((l) => l.text).join('\n');
+        fo.appendChild(div);
+        g.appendChild(fo);
+      }
+      // Flow arrows: where each non-final frame continues.
+      layout.placements.forEach((pl, k) => {
+        if (pl.page !== i) return;
+        const next = layout.placements[k + 1];
+        if (!next) return;
+        const a3 = toCss(i, pl.rect[2], pl.rect[1]);
+        const label = next.page === pl.page ? 'continues ↓' : `→ page ${next.page + 1}`;
+        const w = 10 + label.length * 5.4;
+        g.appendChild(svgEl('rect', { x: a3.x - w, y: a3.y - 17, width: w, height: 14, rx: 3, fill: '#3b5bfd', opacity: 0.9, 'pointer-events': 'none' }));
+        g.appendChild(svgText(a3.x - w + 4, a3.y - 6, label, 9));
+      });
+      if (e.overset) {
+        const first = layout.placements.find((pl) => pl.page === i) || layout.placements[0];
+        if (first) {
+          const c = toCss(i, first.rect[0], first.rect[3]);
+          g.appendChild(oversetBadge(c.x, c.y - 20, `overset +${e.overset.lines}`));
+        }
+      }
+      svg.appendChild(g);
       continue;
     }
     const block = !!e.itemIndices?.length;

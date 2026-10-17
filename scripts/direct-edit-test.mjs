@@ -12,8 +12,17 @@
  *    defaults instead of the block.
  *
  * 2. "It shouldn't remove the text — it should add a text box upon it." A
- *    commit now produces a real text box annotation laid over the original
- *    run. The original text is never removed from the file.
+ *    commit produces a real text box annotation over the original run, so the
+ *    edit stays draggable and re-editable on screen.
+ *
+ *    Note the file contract is the OPPOSITE of the on-screen one: on save the
+ *    writer REMOVES the owned source operators and writes the replacement as
+ *    ordinary page text, and the paired box is omitted from the file so the text
+ *    layer is the single source of truth (see the `truthful:` rows in
+ *    --parity-test and scripts/truthful-save-test.mjs). This suite drives the
+ *    LIVE UI only, so the rows below assert the overlay behaviour — the page's
+ *    own text layer is untouched on screen because the edit is a preview, not a
+ *    re-render.
  *
  * Asserted against the REAL app over CDP: hit testing, focus, panel routing
  * and re-render only exist on screen.
@@ -123,6 +132,20 @@ const editorState = () => ev(`(function(){
 
 await sleep(2600);
 await ev(`document.querySelector('#emptyWorkspace')?.classList.add('hidden')`);
+
+// The renderer target appears before app.js finishes booting, so on a cold start
+// the ribbon buttons may not exist yet and the very first click lands on nothing
+// — every later step then fails for the wrong reason. Wait for the boot flag AND
+// the buttons AND a rendered page before driving the UI.
+{
+  const bootDeadline = Date.now() + 30000;
+  let ready = false;
+  while (!ready && Date.now() < bootDeadline) {
+    ready = await ev(`!!window.__aipdfBooted && document.querySelectorAll('.rbtn').length > 0 && document.querySelectorAll('.page').length > 0`);
+    if (ready !== true) await sleep(300);
+  }
+  check('the app finished booting and painted the ribbon', ready === true);
+}
 
 /* ══ 1. Arm the Direct Editor and open a block ════════════════════════════ */
 
@@ -291,12 +314,15 @@ check('the committed edit exists as a text box annotation', !!mine, JSON.stringi
 check('the text box carries the font chosen in the panel', !!mine && /Times/.test(mine.family || ''), mine && mine.family);
 check('the text box carries the colour chosen in the panel', !!mine && /255,\s*0,\s*0/.test(mine.color || ''), mine && mine.color);
 check('the text box carries the bold set with Ctrl+B', !!mine && /700|bold/.test(mine.weight || ''), mine && mine.weight);
-check('the original text is NOT removed — it is still in the page text layer',
+check('the live preview leaves the source page text layer untouched',
   after.spans === beforeText && !!beforeText, `"${after.spans}" vs "${beforeText}"`);
-check('a cover wash hides the original run', after.covers === 1, `covers=${after.covers}`);
+check('the live preview paints a cover wash over the original run', after.covers === 1, `covers=${after.covers}`);
 check('the replacement text is not drawn twice', after.looseText === 0, `loose=${after.looseText}`);
-check('the properties panel switches to the new text box',
-  /Text box/i.test(after.panelTitle || ''), `title="${after.panelTitle}"`);
+check('the properties panel opens the edit behind the new box',
+  // A Direct Editor box is the on-screen handle for a text EDIT, so selecting it
+  // shows the edit's panel (story, frames, composition) with the box's own
+  // appearance controls kept above — not a bare typewriter box's panel.
+  /Text block/i.test(after.panelTitle || ''), `title="${after.panelTitle}"`);
 
 /* ══ 7. The resulting box is a normal, editable object ════════════════════ */
 
@@ -319,7 +345,8 @@ if (boxPos) {
              handles: document.querySelectorAll('.annLayer .handle, .handle').length };
   })()`);
   check('the box can be picked up again after the edit',
-    /Text box/i.test(sel.title || ''), `title="${sel.title}" handles=${sel.handles}`);
+    /Text block/i.test(sel.title || '') && sel.handles > 0,
+    `title="${sel.title}" handles=${sel.handles}`);
 }
 
 /* ══ 8. Deleting the box restores the original text ═══════════════════════ */

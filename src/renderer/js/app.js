@@ -12,7 +12,7 @@ import { indexDocumentFonts, resetDocumentFonts, resolveFontFor } from './fontre
 import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
 import { initSidebar, renderSidebar, setSidebar, renderSidebarChrome } from './sidebar.js';
 import { initTools, selectAnnot, transformAnnot, clearFormat } from './tools.js';
-import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, recognizePageForEditing } from './textedit.js';
+import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout } from './textedit.js';
 import { runSearch, nextMatch, prevMatch, clearHighlights } from './search.js';
 import { loadFormFields, renderFormFields, startFieldPlacement, exportFormData, importFormData, resetForm } from './forms.js';
 import { watermarkDialog, headerFooterDialog, batesDialog, signatureDialog } from './stamps.js';
@@ -677,18 +677,21 @@ async function boot() {
       return { ok, detail: `family=${found.fontFamily} size=${found.fontSize} align=${found.align} bold=${found.bold} color=${JSON.stringify(found.textColor)}` };
     });
 
-    /* ── K. Cover editing: a replaced block is hidden, not deleted ──
-       The Direct Editor covers the original words with an opaque wash and
-       draws the replacement as ordinary selectable PDF text on top. These rows
-       assert that contract: after a save, the replacement is real text in the
-       file, the original is still underneath (covered, not deleted — use
-       Redact + Sanitize for true removal), and neighbouring text survives. */
+    /* ── K. Object-owned editing: a replaced block is REMOVED, not covered ──
+       The Direct Editor used to cover the original words with an opaque wash.
+       That made the file lie about its own contents — a screenshot looked right
+       while the old, searchable words were still extractable underneath. The
+       writer now removes the owned source operators and inserts the replacement.
+       These rows assert the new contract: after a save the replacement is real
+       text, the ORIGINAL IS GONE from extraction, neighbouring text survives,
+       and the removal mode is recorded on the edit. A wash remains only as the
+       fallback for pages whose glyphs are pixels or live in a Form XObject. */
     const flat = async (i) => {
       const tc = await V.getTextContent(i);
       return (tc.items || []).map((x) => x.str).join(' ').replace(/\s+/g, ' ').trim();
     };
 
-    await guard('cover: a replaced block is washed over and the replacement is real text', async () => {
+    await guard('truthful: a replaced block is REMOVED from the file and the replacement is real text', async () => {
       await openDocFromPath('.fixtures/fixture.pdf');
       const d0 = activeDoc();
       if (!d0) return { ok: false, detail: 'no active doc' };
@@ -707,15 +710,15 @@ async function boot() {
       if (!wres || !wres.ok) return { ok: false, detail: 'write failed: ' + (wres && wres.error) };
       await openDocFromPath('.smoke/parity-reflow.pdf');
       const after = await flat(0);
-      const covered = after.includes(needle);
+      const stillThere = after.includes(needle);
       const added = after.includes(marker);
-      return { ok: covered && added,
-        detail: `covered=${covered} added=${added} needle=${JSON.stringify(needle)} after=${JSON.stringify(after.slice(0, 90))}` };
+      return { ok: !stillThere && added,
+        detail: `originalGone=${!stillThere} added=${added} needle=${JSON.stringify(needle)} after=${JSON.stringify(after.slice(0, 90))}` };
     });
 
-    await guard('cover: text outside the replaced block survives', async () => {
+    await guard('truthful: text outside the replaced block survives', async () => {
       // The fixture's other paragraph must still be readable in the saved file —
-      // a wash that reached past the block would have buried it.
+      // an excision that reached past the block would have deleted it.
       const before = await flat(0);
       const survived = before.includes('This sentence on page one');
       const replaced = before.includes('REFLOWPROOF');
@@ -723,7 +726,29 @@ async function boot() {
         detail: `survived=${survived} replaced=${replaced} text=${JSON.stringify(before.slice(0, 90))}` };
     });
 
-    await guard('cover: the replacement is ordinary PDF text, editable again', async () => {
+    await guard('truthful: removal mode and overset are recorded on the edit', async () => {
+      await openDocFromPath('.fixtures/fixture.pdf');
+      const d0 = activeDoc();
+      if (!d0) return { ok: false, detail: 'no active doc' };
+      const blocks = await editableBlocks(0);
+      const block = blocks.find((b) => b.text.trim().length > 12) || blocks[0];
+      await commitBlockEdit(0, block, 'MODEPROOF', {});
+      const edit = activeDoc().textEdits[0];
+      await buildPdf(activeDoc());
+      const mode = edit.removal;
+      const hasSchema = edit.schemaVersion >= 2;
+      const hasRefs = !!(edit.sourceRefs && edit.sourceRefs.itemIndices.length);
+      const hasFrames = Array.isArray(edit.frames) && edit.frames.length >= 1;
+      return { ok: mode === 'excise' && hasSchema && hasRefs && hasFrames,
+        detail: `removal=${mode} removedBlocks=${edit.removedBlocks} schema=${edit.schemaVersion} refs=${hasRefs} frames=${edit.frames && edit.frames.length} overset=${JSON.stringify(edit.overset)}` };
+    });
+
+    await guard('truthful: the replacement is ordinary PDF text, editable again', async () => {
+      // Self-contained: reopen the file guard 1 saved rather than relying on
+      // whatever document an earlier row happened to leave active. This is the
+      // row that proves the replacement is real, re-editable page text — it
+      // must read the saved bytes, not the in-memory model.
+      await openDocFromPath('.smoke/parity-reflow.pdf');
       const blocks = await editableBlocks(0);
       const hit = blocks.find((b) => b.text.includes('REFLOWPROOF'));
       if (!hit) return { ok: false, detail: `no block contains the replacement: ${JSON.stringify(blocks.map((b) => b.text.slice(0, 20)))}` };
@@ -739,12 +764,12 @@ async function boot() {
         detail: JSON.stringify(after.slice(0, 90)) };
     });
 
-    await guard('cover: an edit over blank space still saves', async () => {
+    await guard('truthful: an edit over blank space still saves', async () => {
       await openDocFromPath('.fixtures/fixture.pdf');
       const d0 = activeDoc();
       if (!d0) return { ok: false, detail: 'no active doc' };
-      // A rect well below the body text: no original text underneath, so the
-      // writer paints the replacement box wash and draws into it.
+      // A rect well below the body text: no original text underneath, so there
+      // is nothing to excise and the writer draws the replacement into it.
       d0.textEdits.push({
         id: 'te-coverfallback', page: 0, rect: [60, 60, 300, 80], coverRect: [60, 60, 300, 80],
         baseline: [62, 64], size: 11, angle: 0, fontFamily: 'Helvetica', color: [0, 0, 0],
@@ -1559,7 +1584,7 @@ function renderWelcome() {
     ['ai', 'AI with real citations', 'Answers quote the page they came from — click to jump straight there. Ask across all open documents at once.'],
     ['scan', 'OCR scanned pages', 'Flattened pages are detected automatically; recognise English, Hindi and Nepali/Devanagari text locally.'],
     ['highlight', 'Full markup toolset', 'Highlight, underline, strikethrough, notes, shapes, ink, stamps and redaction.'],
-    ['editText', 'Direct Editor', 'Click into any line and type straight onto the page. On save the original text is removed from the file, not covered up.'],
+    ['editText', 'Direct Editor', 'Click into any line and type straight onto the page. On save the original text is removed from the file, not covered up — a cover is used only where removal is impossible, such as a scan or text inside a shared form.'],
     ['font', 'Font intelligence', 'See every embedded font per page and reuse an embedded font for the text you add.'],
     ['lock', 'AES-256 protection', 'Password-encrypt with real permissions, no account required.'],
     ['pages', 'Organise pages', 'Insert, delete, extract, rotate, reorder by drag & drop, merge and split.'],
@@ -3298,11 +3323,12 @@ function renderToolProps(host, panel) {
       el('div', { class: 'prop-title', text: 'About' }),
       el('div', { class: 'kv' }, [
         el('b', { text: 'Writes' }),
-        // The old copy claimed the original text was deleted from the file. It
-        // never was — and now the model says so out loud: a commit lays a text
-        // box over the original run. The original stays in the file (searchable,
-        // recoverable by deleting the box) and is simply hidden underneath.
-        el('span', { text: 'A text box is placed over the original text. Nothing is removed from the file — delete the box and the original text is back. This is not secure redaction: use Redact + Sanitize for that.' }),
+        // The old copy promised the original was deleted from the file, which
+        // the cover model never delivered — it only hid it. The writer now makes
+        // the promise true: the owned source operators are removed and the
+        // replacement is written as ordinary page text, so search, copy-paste
+        // and a screen reader all agree with what the page shows.
+        el('span', { text: 'The original run is removed from the file and the new text is written as ordinary page text — searchable, copyable and editable again. Where removal is impossible (a scan whose glyphs are pixels, or text inside a shared form) the original is covered instead and the Story group says so. Still not secure redaction: use Redact + Sanitize for that.' }),
       ]),
       el('div', { class: 'kv' }, [
         el('b', { text: 'Afterwards' }),
@@ -3574,7 +3600,17 @@ function renderContext() {
   // editing the wrong thing entirely).
   if (directEditorOpen()) return renderToolProps(host, panel);
 
-  if (sel.length === 1) return renderAnnotProps(sel[0], host, panel);
+  if (sel.length === 1) {
+    // A Direct Editor box is the on-screen handle for a text EDIT. Selecting it
+    // must show the edit's own panel — story, frames, composition — because that
+    // is where the three explicit actions live. A plain typewriter box has no
+    // edit behind it and keeps the ordinary appearance panel.
+    const box = sel[0];
+    const linked = box && box.directEdit
+      ? (doc.textEdits || []).find((x) => x.id === box.directEdit) : null;
+    if (linked) return renderTextEditProps(linked, host, panel, box);
+    return renderAnnotProps(sel[0], host, panel);
+  }
   // A committed Direct Editor block: drag it on the page, re-open it here.
   const tes = (doc.textEdits || []).filter((x) => state.selection.includes(x.id));
   if (!sel.length && tes.length === 1) return renderTextEditProps(tes[0], host, panel);
@@ -3607,13 +3643,18 @@ function renderContext() {
   host.appendChild(box);
 }
 
-function renderTextEditProps(e, host, panel) {
+function renderTextEditProps(e, host, panel, box = null) {
   panel.classList.remove('hidden');
-  $('#ctxTitle').textContent = 'Text block';
   host.innerHTML = '';
+  // Reached through the edit's own box? Keep that box's appearance controls
+  // first — it is still a normal text box the user can restyle — then append the
+  // story controls underneath. The box is what was clicked, so dropping its
+  // panel would make restyling it impossible.
+  if (box) renderAnnotProps(box, host, panel);
+  $('#ctxTitle').textContent = 'Text block';
   const g1 = el('div', { class: 'prop-group' });
   g1.appendChild(el('div', { class: 'prop-title', text: 'Edited text' }));
-  g1.appendChild(el('div', { class: 'hint', text: 'Drag the block anywhere on the page — its cover wash stays over the original text. Double-click the block to type into it again.' }));
+  g1.appendChild(el('div', { class: 'hint', text: 'Drag the box anywhere on the page, or double-click it to type into it again. On save the original run is removed from the file and this text is written as ordinary page text.' }));
   const row = el('div', { class: 'prop-row' });
   const edit = el('button', { class: 'mini-btn primary', text: 'Edit text' });
   edit.onclick = () => { void openEditorForEdit(e.page, e.id); };
@@ -3632,6 +3673,92 @@ function renderTextEditProps(e, host, panel) {
   row.append(edit, del);
   g1.appendChild(row);
   host.appendChild(g1);
+
+  /* ── Story: the authoring model behind this edit ──────────────────────────
+     The three explicit actions the research asks for live here, each named for
+     what it does rather than a single ambiguous "Link". */
+  const g2 = el('div', { class: 'prop-group' });
+  g2.appendChild(el('div', { class: 'prop-title', text: 'Story' }));
+  const frames = Array.isArray(e.frames) ? e.frames : [];
+  const frameN = frames.length || 1;
+  g2.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Mode' }), el('span', { text: e.mode === 'flow' ? 'Flowing paragraph' : 'Single line' })]));
+  g2.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Frames' }), el('span', { text: frameN === 1 ? '1 (in place)' : `${frameN} linked` })]));
+  if (e.removal) {
+    g2.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'On save' }), el('span', {
+      text: e.removal === 'excise' ? `Original removed (${e.removedBlocks || 0} run${(e.removedBlocks || 0) === 1 ? '' : 's'})` : 'Covered (cannot remove here)',
+    })]));
+  }
+  if (e.overset) {
+    const warn = el('div', { class: 'hint', style: { color: 'var(--danger)' },
+      text: `Overset: ${e.overset.lines} line${e.overset.lines === 1 ? '' : 's'} do not fit and are not shown on the page. Add a frame, enlarge it, or shorten the text — export would drop them.` });
+    g2.appendChild(warn);
+  }
+  const srow = el('div', { class: 'prop-row' });
+  const nextPage = (e.page ?? 0) + 1;
+  const linkBtn = el('button', { class: 'mini-btn', text: 'Continue on next page' });
+  linkBtn.disabled = nextPage >= (activeDoc()?.numPages || 0);
+  linkBtn.title = 'Link frames: compose this text into a frame on the next page, continuing from where this frame ends.';
+  linkBtn.onclick = async () => {
+    const doc = activeDoc();
+    if (!doc) return;
+    const box = e.drawBox || (frames[0] && frames[0].rect) || e.rect;
+    const chain = frames.length ? frames.map((f) => ({ page: f.page, rect: f.rect.slice() })) : [{ page: e.page, rect: box.slice() }];
+    chain.push({ page: nextPage, rect: box.slice() });
+    await threadEditFrames(e.id, chain);
+    renderAllAnnotations();
+    renderContext();
+    emit('annots');
+  };
+  const unlinkBtn = el('button', { class: 'mini-btn', text: 'Unlink frames' });
+  unlinkBtn.disabled = frameN < 2;
+  unlinkBtn.onclick = async () => {
+    await threadEditFrames(e.id, [{ page: e.page, rect: (e.drawBox || e.rect).slice() }]);
+    renderAllAnnotations();
+    renderContext();
+    emit('annots');
+  };
+  srow.append(linkBtn, unlinkBtn);
+  g2.appendChild(srow);
+
+  // "Make paragraph" — merge this edit's source with the next block on the page,
+  // an explicit decision with the separator the user picks.
+  const mergeRow = el('div', { class: 'prop-row' });
+  const sepSel = el('select', { style: { width: '100%' } });
+  for (const [v, t] of [[' ', 'Join with a space (soft wrap)'], ['\n', 'Keep a line break'], ['', 'Join with nothing (split fragment)']]) {
+    sepSel.appendChild(el('option', { value: v, text: t }));
+  }
+  const mergeBtn = el('button', { class: 'mini-btn', text: 'Make paragraph with next block' });
+  mergeBtn.onclick = async () => {
+    const doc = activeDoc();
+    if (!doc) return;
+    const blocks = await editableBlocks(e.page);
+    // Find the block this edit owns, then the one after it in source order.
+    const mine = blocks.findIndex((b) => (e.itemIndices || []).some((k) => (b.itemIndices || []).includes(k)) || (e.key && b.key === e.key));
+    const next = mine >= 0 ? mine + 1 : -1;
+    if (next < 0 || next >= blocks.length) { toast('No following block on this page to merge with.', 'warn'); return; }
+    const ok = await mergeBlocksIntoParagraph(e.page, [mine, next], { separators: [sepSel.value] });
+    if (!ok) { toast('Nothing to merge.', 'warn'); return; }
+    renderAllAnnotations();
+    renderContext();
+    emit('annots');
+  };
+  const mg = el('div', { class: 'prop-group' });
+  mg.appendChild(el('div', { class: 'prop-title', text: 'Make paragraph' }));
+  mg.appendChild(el('div', { class: 'hint', text: 'Declare this text and the next block ONE logical sequence. You choose how the two are joined — never guessed automatically.' }));
+  mg.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Join' }), el('div', { class: 'pr-c' }, [sepSel])]));
+  mergeRow.appendChild(mergeBtn);
+  mg.appendChild(mergeRow);
+  host.appendChild(g2);
+  host.appendChild(mg);
+
+  const preview = previewEditLayout(e.id);
+  if (preview) {
+    const pg = el('div', { class: 'prop-group' });
+    pg.appendChild(el('div', { class: 'prop-title', text: 'Composition' }));
+    pg.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Placed' }), el('span', { text: `${preview.consumed} of ${preview.total} characters` })]));
+    pg.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Overset' }), el('span', { text: preview.overset ? `yes — ${preview.overset.lines} line(s) left over` : 'none' })]));
+    host.appendChild(pg);
+  }
 }
 
 function renderAnnotProps(a, host, panel) {
@@ -4016,6 +4143,7 @@ function shortcutHelpHtml() {
     ['Ctrl+0 / Ctrl+1', 'Fit page / Fit width'],
     ['Ctrl+2 / 3 / 4', 'Single / Continuous / Facing'],
     ['Ctrl+= / Ctrl+-', 'Zoom in / out'],
+    ['Ctrl + mouse wheel', 'Zoom in / out at the cursor'],
     ['Ctrl+Shift+= / -', 'Rotate page'],
     ['Home / End', 'First / last page'],
     ['Page Up / Page Down', 'Previous / next page'],

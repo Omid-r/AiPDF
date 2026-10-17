@@ -142,11 +142,20 @@ function onPointerDown(e) {
     const teNode = e.target.closest ? e.target.closest('.textedit') : null;
     if (teNode && teNode.dataset.eid) {
       const ed = doc.textEdits.find((x) => x.id === teNode.dataset.eid);
-      if (ed && ed.page === i) {
+      // A threaded story spans an ordered frame chain, so a frame on ANY of its
+      // pages must be able to re-open the story's panel — not only the first.
+      const threaded = !!(ed && Array.isArray(ed.frames) && ed.frames.length > 1);
+      const onThisPage = !!ed && (ed.page === i || (threaded && ed.frames.some((f) => f.page === i)));
+      if (ed && onThisPage) {
         if (e.shiftKey && !state.selection.includes(ed.id)) state.selection = [...state.selection, ed.id];
         else if (!e.shiftKey) state.selection = [ed.id];
         renderAnnots(i);
         emit('selection');
+        // Dragging one frame's outline would silently desynchronise the chain
+        // (the other frames would keep the old geometry), so a threaded story is
+        // selected for the panel without starting a move. Its geometry is edited
+        // through Link / Unlink frames instead.
+        if (threaded) { e.preventDefault(); return; }
         drag = {
           mode: 'moveText', i, eid: ed.id,
           last: clientToPdf(i, e.clientX, e.clientY),

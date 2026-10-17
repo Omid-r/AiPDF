@@ -38,6 +38,33 @@ export function initViewer() {
     onRulersScroll();
   }, { passive: true });
 
+  // Ctrl + wheel zooms the document — the same gesture a trackpad pinch emits
+  // (Chromium reports pinch as ctrl+wheel). A plain wheel keeps scrolling; only
+  // the ctrl chord is hijacked, and preventDefault stops Electron's own
+  // whole-page zoom from firing on top of ours. The zoom is anchored at the
+  // cursor so the page point under the pointer stays put while the pages scale.
+  scroller.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    const rect = scroller.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const contentX = scroller.scrollLeft + cx;
+    const contentY = scroller.scrollTop + cy;
+    const before = currentScale();
+    // Normalise line/page deltas to pixels, then clamp so a single inertial
+    // fling cannot jump the zoom; exp() makes the step feel proportional.
+    const raw = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 100 : e.deltaY;
+    const d = clamp(raw, -120, 120);
+    zoomBy(Math.exp(-d * 0.0018));
+    const after = currentScale();
+    if (before > 0 && after > 0) {
+      const ratio = after / before;
+      scroller.scrollLeft = contentX * ratio - cx;
+      scroller.scrollTop = contentY * ratio - cy;
+    }
+  }, { passive: false });
+
   window.addEventListener('resize', () => {
     // Rulers are viewport-sized, so a resize repaints even when the scale did
     // not change. One frame, scheduled from the event — never a standing loop.

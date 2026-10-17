@@ -6,6 +6,9 @@ import { el, rgbToCss, hexToRgb, rgbToHex, clamp, toast, uid } from './util.js';
 import { renderPageAnnotations } from './annots.js';
 import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, textEditDrawBox } from './textblocks.js';
 import { rectUnion } from './textops.js';
+import {
+  SCHEMA_VERSION, mergeStories, threadStory, storyFromEdit, layoutStory, fitCount, makeFrame, normRect,
+} from './story.js';
 import { isUserFont, listSystemFonts } from './fonts.js';
 import { resolveFontFor } from './fontresolve.js';
 import { confirmDialog } from './dialog.js';
@@ -166,9 +169,19 @@ export async function renderEditableBlocks(pageIndex = null) {
     // button would eat the pointer. Test by geometry so it covers both the
     // edited block itself and neighbours the box overlaps; the margin reaches
     // the handles, which sit just outside the box's own footprint.
-    const committedBoxes = (doc.textEdits || [])
-      .filter((e) => e.page === i && e.boxId && doc.annots.some((a) => a.id === e.boxId))
-      .map((e) => doc.annots.find((a) => a.id === e.boxId).rect);
+    const committedBoxes = [];
+    for (const e of doc.textEdits || []) {
+      if (e.page === i && e.boxId && doc.annots.some((a) => a.id === e.boxId)) {
+        committedBoxes.push(doc.annots.find((a) => a.id === e.boxId).rect);
+      }
+      // A threaded story carries no text box — its ordered frames ARE the
+      // committed region. Without this the block affordance reappears the moment
+      // "Link frames" drops the box, and every click on the story is eaten by a
+      // button that is meant to be gone.
+      if (Array.isArray(e.frames) && e.frames.length > 1) {
+        for (const f of e.frames) if (f.page === i) committedBoxes.push(f.rect);
+      }
+    }
     const HANDLE_MARGIN = 12;
     const overlapsBox = (rect) => committedBoxes.some((b) =>
       rect[0] - HANDLE_MARGIN < b[2] && rect[2] + HANDLE_MARGIN > b[0] &&
@@ -187,6 +200,10 @@ export async function renderEditableBlocks(pageIndex = null) {
         style: { left: (x - 2) + 'px', top: (y - 2) + 'px',
           width: Math.max(12, Math.abs(b.x - a.x) + 4) + 'px',
           height: Math.max(12, Math.abs(b.y - a.y) + 4) + 'px' } });
+      // Source-order number. The order is the page's own text order, so two
+      // visually similar runs can be told apart before a merge is confirmed —
+      // the research is emphatic that a merge must be an explicit decision.
+      hit.appendChild(el('span', { class: 'block-order', text: String(n + 1), 'aria-hidden': 'true' }));
       if (source === 'ocr') hit.classList.add('from-ocr');
       layer.appendChild(hit);
     }
@@ -214,7 +231,8 @@ function emptyNotice(pageIndex, source) {
  *  otherwise-identical edit count as a change, so re-applying the same text
  *  with a different alignment is not silently dropped. */
 const BLOCK_FIELDS = ['text', 'size', 'color', 'maxWidth', 'maxHeight', 'align',
-  'bold', 'italic', 'underline', 'lineHeight', 'charSpacing', 'hScale', 'fontFamily'];
+  'bold', 'italic', 'underline', 'lineHeight', 'charSpacing', 'hScale', 'fontFamily',
+  'mode', 'frames'];
 
 /** Replaces an entire geometric block, so an AI change to a few words never
  * whites out the rest of a run without redrawing it. One block has one pending
@@ -236,8 +254,33 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
   const edit = {
     ...block, ...existing,
     id: existing?.id || uid('te'), page: pageIndex,
+    // The authoring model's identity for this record. `schemaVersion` lets a
+    // future change migrate old projects instead of guessing at their shape.
+    schemaVersion: SCHEMA_VERSION,
+    // 'line' keeps the block a single line and rejects wrapping; 'flow' permits
+    // paragraph wrapping and frame threading. A record with more than one frame
+    // is always a flow story.
+    mode: options.mode || existing?.mode
+      || (options.frames && options.frames.length > 1 ? 'flow' : 'line'),
     key: block.key, kind: block.kind || 'n',
     itemIndices: (block.itemIndices || []).slice(), original: existing?.original ?? block.text, text,
+    // Explicit source ownership: the exact source objects this story owns. The
+    // writer may remove these and only these. A selection is a proposal until
+    // it is recorded here.
+    sourceRefs: {
+      itemIndices: (block.itemIndices || []).slice(),
+      lineIds: (block.lineIds || []).slice(),
+    },
+    sourceRects: (options.sourceRects && options.sourceRects.length
+      ? options.sourceRects
+      : [(existing?.coverRect || block.coverRect).slice()]).map(normRect).filter(Boolean),
+    // Ordered destination frames. One frame is the ordinary in-place edit; two
+    // or more is a threaded story that continues across pages.
+    frames: (options.frames && options.frames.length ? options.frames.map((f) => makeFrame(f.page ?? pageIndex, f.rect || f))
+      : existing?.frames || null),
+    // What will draw the text and what it cannot draw — recorded so the report
+    // describes the file, not the request.
+    fontPolicy: options.fontPolicy || existing?.fontPolicy || null,
     // Cover model: the cover stays over the ORIGINAL footprint forever, while
     // the replacement text box travels with the user. On re-edit, keep the
     // moved geometry — resetting to the block would teleport a dragged block
@@ -271,6 +314,25 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
   // is to widen the excision rect on the NEXT edit so re-editing your own edit
   // cannot leave the previous replacement behind.
   const base = existing?.baseline || block.baseline;
+  // Every story owns at least one destination frame: an ordinary in-place edit
+  // is a ONE-frame story and only a threaded story carries more. Deriving the
+  // frame here — rather than leaving `frames` null — keeps the record one shape
+  // whether it was authored in place or threaded across pages, so the writer,
+  // the layout preview and the inspector all read the same field.
+  if (!edit.frames || !edit.frames.length) {
+    const fs = edit.size || 11;
+    const fh = edit.maxHeight || block.maxHeight || fs * 1.25;
+    // The geometry must agree with the overset computation below. The layout
+    // model seats the first baseline one font-size below the frame top, so the
+    // frame top is `baseline + size` and the frame height is exactly the box
+    // height — anything else and the live badge would contradict the readout.
+    edit.frames = [makeFrame(pageIndex, [
+      base[0],
+      base[1] + fs - fh,
+      base[0] + (edit.maxWidth || block.maxWidth || 10),
+      base[1] + fs,
+    ])];
+  }
   const leading0 = edit.lineHeight || block.lineHeight || edit.size;
   const boxH = edit.maxHeight || block.maxHeight || edit.size * 1.25;
   const lines0 = Math.max(1, Math.round((boxH - edit.size) / leading0) + 1);
@@ -287,21 +349,175 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
   edit.exciseRect = existing
     ? rectUnion(existing.exciseRect || block.coverRect, drawnFootprint)
     : block.coverRect.slice();
+
+  // Overset, computed from the same wrapping the writer will use. A frame is an
+  // outer ink constraint: if the story needs more lines than the frame can hold,
+  // that is reported here rather than discovered as text silently clipped out of
+  // view in some other reader.
+  //
+  // This must mirror pdfwrite.js applyTextEdit exactly. The writer hard-wraps
+  // EVERY block at its box width — line mode included, because "rejects
+  // wrapping" only means the user cannot author a soft wrap, it does not license
+  // the writer to run text off the page. Computing overset any other way here
+  // would let the live badge and the Composition readout disagree with the file
+  // they are describing. (At save time the writer overwrites these three fields
+  // with its own font-accurate numbers; this is the on-screen estimate.)
+  const overMeasure = measureFor({ fontFamily: edit.fontFamily }, edit.size || 11);
+  const overLines = wrapBlockText(text, edit.maxWidth || block.maxWidth || 10, overMeasure);
+  const overBoxH = edit.maxHeight || block.maxHeight || (edit.size || 11) * 1.25;
+  const fitN = fitCount(overLines, overBoxH, edit.size || 11, edit.lineHeight || (edit.size || 11) * 1.2);
+  edit.consumed = fitN;
+  edit.total = overLines.length;
+  edit.overset = fitN < overLines.length
+    ? { text: overLines.slice(fitN).join('\n'), lines: overLines.length - fitN }
+    : null;
+
   if (existing && !BLOCK_FIELDS.some((k) => JSON.stringify(edit[k]) !== JSON.stringify(existing[k]))) return false;
   if (existing) Object.assign(existing, edit);
   else doc.textEdits.push(edit);
   pushHistory(options.label || 'direct edit');
   // A Direct Editor commit IS a text box laid over the original text — never a
-  // removal. The edit record keeps the mapping back to the original run (so
-  // text extraction, search and re-editing still resolve it), while the box
-  // becomes the thing on screen and in the file: selectable, movable,
-  // restylable, deletable, and saved as a real /FreeText annotation.
-  const boxId = syncEditBox(doc, edit, pageIndex);
+  // removal of the model record. The edit record keeps the mapping back to the
+  // original run (so text extraction, search and re-editing still resolve it),
+  // while the box becomes the thing on screen and in the file: selectable,
+  // movable, restylable, deletable, and saved as a real /FreeText annotation.
+  //
+  // A THREADED story (two or more frames) is the exception: it is composed by
+  // the writer into its frame chain, so it carries no single box — one box could
+  // not express text continuing onto another page.
+  const boxId = (edit.frames && edit.frames.length > 1) ? null : syncEditBox(doc, edit, pageIndex);
   if (boxId) state.selection = [boxId];
   renderPageAnnotations(pageIndex);
   emit('annots');
   emit('selection');
   return true;
+}
+
+/**
+ * "Make paragraph" — declare several source selections ONE logical text
+ * sequence in one frame.
+ *
+ * The reading order is the order of `blockIndices`, and `opts.separators[i]` is
+ * what joins item i to item i+1: `' '` for a soft source wrap, `'\n'` for an
+ * intentional break, `''` for a fragment the producer split rather than the
+ * author. This function obeys that decision — it never invents one, and it never
+ * strips a final hyphen on its own, because a discretionary split may be
+ * rejoined while a genuine compound word must keep its hyphen, and only the user
+ * can tell which is which.
+ *
+ * The frame is the union of the original ink bounds: a PROPOSAL, not
+ * necessarily the paragraph width the user wants, and adjustable afterwards.
+ */
+export async function mergeBlocksIntoParagraph(pageIndex, blockIndices, opts = {}) {
+  const doc = activeDoc();
+  if (!doc) return false;
+  const blocks = await editableBlocks(pageIndex);
+  const picks = (blockIndices || []).map((i) => blocks[i]).filter(Boolean);
+  if (!picks.length) return false;
+  if (picks.length === 1) {
+    const b = picks[0];
+    return commitBlockEdit(pageIndex, b, opts.text ?? blockText(doc, pageIndex, b), { ...opts, mode: 'flow' });
+  }
+  const items = picks.map((b) => {
+    const prior = editForBlock(doc, pageIndex, b);
+    return {
+      text: prior ? prior.text : b.text,
+      page: pageIndex,
+      coverRect: b.coverRect,
+      itemIndices: b.itemIndices,
+      lineIds: b.lineIds,
+      style: {
+        size: prior?.size || b.size, leading: prior?.lineHeight || b.lineHeight,
+        fontFamily: prior?.fontFamily || b.fontFamily, color: prior?.color || b.color,
+      },
+      original: b.text,
+    };
+  });
+  let rect = picks[0].coverRect.slice();
+  for (const b of picks.slice(1)) rect = rectUnion(rect, b.coverRect);
+  const story = mergeStories(items, {
+    frame: { page: pageIndex, rect },
+    separators: opts.separators || [],
+    text: opts.text ?? null,
+    align: opts.align,
+  });
+  const first = picks[0];
+  // A synthetic block carries the whole merged selection through the ordinary
+  // commit path: every source item's indices are in it, so re-opening the
+  // paragraph from ANY of its original lines resolves back to this one story.
+  const synthetic = {
+    ...first,
+    key: `p:${pageIndex}:${story.sourceRefs.itemIndices.join('.')}`,
+    itemIndices: story.sourceRefs.itemIndices.slice(),
+    lineIds: story.sourceRefs.lineIds.slice(),
+    coverRect: rect,
+    rect: rect.slice(),
+    text: story.text,
+    maxWidth: Math.max(10, rect[2] - rect[0]),
+    maxHeight: Math.max(10, rect[3] - rect[1]),
+    lineHeight: story.style.leading,
+    size: story.style.size,
+    fontFamily: story.style.fontFamily,
+  };
+  return commitBlockEdit(pageIndex, synthetic, story.text, {
+    ...opts, mode: 'flow',
+    frames: [{ page: pageIndex, rect: rect.slice() }],
+    // Excise each source rect separately, never one big union: the user may have
+    // selected lines 1 and 3 and skipped line 2, and a union would delete a line
+    // the replacement does not contain.
+    sourceRects: picks.map((b) => b.coverRect.slice()),
+    label: opts.label || 'make paragraph',
+  });
+}
+
+/**
+ * "Link frames" — give a committed story an explicitly ordered chain of
+ * destination frames. Text composes into frame 1, then continues from the exact
+ * logical position into frame 2, and so on; the frames may sit on different
+ * pages and are never merged into one rectangle.
+ *
+ * A threaded story stops carrying a text box: one box cannot express text that
+ * continues onto another page, so the writer composes it into the frame chain
+ * instead.
+ */
+export async function threadEditFrames(eid, frames, opts = {}) {
+  const doc = activeDoc();
+  const ed = doc?.textEdits.find((x) => x.id === eid);
+  if (!ed) return false;
+  const story = threadStory(storyFromEdit(ed), frames);
+  if (!story || !story.frames.length) return false;
+  ed.frames = story.frames.map((f) => ({ page: f.page, rect: f.rect.slice() }));
+  ed.mode = 'flow';
+  if (ed.frames.length > 1 && ed.boxId) {
+    // Drop the single-frame box so the writer takes the framed path.
+    const boxId = ed.boxId;
+    doc.annots = doc.annots.filter((a) => a.id !== boxId);
+    ed.boxId = null;
+    state.selection = state.selection.filter((id) => id !== boxId);
+  } else if (ed.frames.length === 1 && !ed.boxId) {
+    // Collapsing back to one frame restores the in-place representation: a
+    // single-frame edit is drawn by its own text box, so without this the story
+    // would have nothing on screen and no way back into its panel.
+    syncEditBox(doc, ed, ed.page);
+  }
+  // Keep the story selected across the change, so the panel that carries the
+  // Link / Unlink controls does not vanish the instant it is used.
+  state.selection = [ed.id];
+  pushHistory(opts.label || 'link frames');
+  for (const f of ed.frames) renderPageAnnotations(f.page);
+  emit('annots');
+  return true;
+}
+
+/** Compose a committed edit without mutating anything — the "preview" step the
+ *  research insists the UI must show before an export. */
+export function previewEditLayout(eid) {
+  const doc = activeDoc();
+  const ed = doc?.textEdits.find((x) => x.id === eid);
+  if (!ed) return null;
+  const story = storyFromEdit(ed);
+  const measure = measureFor({ fontFamily: ed.fontFamily }, ed.size || 11);
+  return layoutStory(story, measure);
 }
 
 /** Keep the text box that represents an edit in step with the edit itself.

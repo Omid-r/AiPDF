@@ -2,9 +2,10 @@
 /**
  * Engine test for the content-stream text primitives (walk/group/excise).
  *
- * Note: the Direct Editor no longer deletes operators on save — it covers
- * (see "Cover editing" in README.md). The exciseText engine in textops.js is
- * retained and tested here as a primitive, but pdfwrite.js does not call it.
+ * Note: pdfwrite.js now DOES call exciseText — a Direct Editor save removes the
+ * owned source operators rather than covering them (see "Object-owned editing"
+ * in README.md). This test exercises the primitive directly; the end-to-end
+ * contract lives in scripts/truthful-save-test.mjs.
  *
  *   node scripts/reflow-test.mjs [file.pdf]
  */

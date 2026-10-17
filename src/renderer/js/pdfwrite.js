@@ -4,6 +4,8 @@ import { pdfDate, clamp } from './util.js';
 import { ANNOT_TYPES, INK_INTENTS, annotationState } from './annots.js';
 import { getCustomFont, getFontkit } from './fonts.js';
 import { wrapBlockText, blocksFromOcrLines, textEditWashes } from './textblocks.js';
+import { exciseText } from './textops.js';
+import { storyFromEdit, layoutStory, fitCount, normRect } from './story.js';
 
 const {
   PDFDocument, StandardFonts, PDFName, PDFNumber, PDFString, PDFHexString,
@@ -659,7 +661,134 @@ async function applyOcrLayer(doc, target, pages, indexMap) {
 
 /* ── Text edits (in-place editing) ──────────────────────────────────────── */
 
-async function applyTextEdit(doc, page, e) {
+/** What a save had to do that the user should know about: an edit that could
+ *  only be covered rather than removed, or text left over as overset. Drained
+ *  by the caller so the report describes the file that was actually written. */
+const exportWarnings = [];
+export function drainExportWarnings() {
+  return exportWarnings.splice(0, exportWarnings.length);
+}
+
+/** Renderer-side zlib inflate for FlateDecode content streams. PDF's FlateDecode
+ *  is zlib-wrapped, which is DecompressionStream('deflate') — not
+ *  'deflate-raw'. Returns null where the API is missing so the caller can fall
+ *  back to covering instead of throwing. */
+async function inflateBytes(bytes) {
+  if (typeof DecompressionStream === 'undefined') return null;
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * Remove the ORIGINAL operators a text edit owns, instead of hiding them.
+ *
+ * The research this editor is built on is explicit that a white cover is not a
+ * deletion: a screenshot looks right while the old, searchable words remain in
+ * the file, so search, copy-paste and a screen reader disagree with the page.
+ * Excision is what makes the saved file truthful.
+ *
+ * It is safe here because buildPdf() always reconstructs the candidate from the
+ * ORIGINAL bytes: excising mutates only the throwaway candidate, so undo and
+ * "Restore original" stay exact.
+ *
+ * Returns { removal: 'excise' | 'cover', removed, fallbackReason? }:
+ *  - 'excise' — the owned operators were cut; nothing is left to hide.
+ *  - 'cover'  — a wash is still required: the glyphs are pixels (a recognised
+ *               scan), or the page's text lives in a shared Form XObject, which
+ *               must never be edited in place because several pages may share it.
+ */
+async function removeOwnedSource(doc, pageIndex, e) {
+  if (e.kind === 'o' || e.bgSource === 'ocr') return { removal: 'cover', removed: 0, fallbackReason: 'scan' };
+  // Excise each owned source rect SEPARATELY. A merged paragraph may own lines 1
+  // and 3 while skipping line 2 — a single union rect would remove line 2, which
+  // the replacement does not contain, and the words would be gone for good.
+  const owned = (Array.isArray(e.sourceRects) && e.sourceRects.length
+    ? e.sourceRects
+    : [e.exciseRect || e.coverRect]).map(normRect).filter(Boolean);
+  if (!owned.length) return { removal: 'cover', removed: 0, fallbackReason: 'no-source-geometry' };
+  const inflate = async (b) => {
+    const out = await inflateBytes(b);
+    if (!out) throw new Error('DecompressionStream unavailable');
+    return out;
+  };
+  try {
+    // Excision is destructive and irreversible once written, so dry-run first
+    // and only commit when it matched the geometry we expected.
+    const dry = await exciseText(PL, doc, pageIndex, owned, { inflate, dryRun: true });
+    if (dry.refused.length) return { removal: 'cover', removed: 0, fallbackReason: 'form-xobject:' + dry.refused.join(',') };
+    if (dry.removed < 1) return { removal: 'cover', removed: 0, fallbackReason: 'no-owned-operators' };
+    const real = await exciseText(PL, doc, pageIndex, owned, { inflate });
+    if (real.refused.length || real.removed < 1) return { removal: 'cover', removed: 0, fallbackReason: 'excision-refused' };
+    return { removal: 'excise', removed: real.removed };
+  } catch (err) {
+    console.warn('text excision failed; falling back to a cover wash', err);
+    return { removal: 'cover', removed: 0, fallbackReason: 'error:' + String(err?.message || err) };
+  }
+}
+
+/** Paint the opaque washes that hide an original run. Used ONLY when the source
+ *  operators could not be removed — a scan, or a shared Form XObject. */
+function washRects(page, rects, bg) {
+  for (const c of rects) {
+    if (!c) continue;
+    page.drawRectangle({
+      x: Math.min(c[0], c[2]), y: Math.min(c[1], c[3]),
+      width: Math.max(1, Math.abs(c[2] - c[0])), height: Math.max(1, Math.abs(c[3] - c[1])),
+      color: rgb(...bg), borderWidth: 0,
+    });
+  }
+}
+
+/**
+ * Compose a story into an ordered chain of frames, on whatever pages the frames
+ * name — the research's "Thread frames". Frame 1 is filled first; the remaining
+ * text continues from the exact logical position into frame 2, and so on. The
+ * frames are never merged into one rectangle.
+ *
+ * Anything left after the last frame is OVERSET: reported, never silently
+ * clipped, and never discarded from the model.
+ */
+async function applyFramedEdit(doc, e, ctx) {
+  const { pageIndex, pages, indexMap, font, size, measure } = ctx;
+  const story = storyFromEdit({ ...e, drawBox: null });
+  const layout = layoutStory(story, measure);
+  e.consumed = layout.consumed;
+  e.total = layout.total;
+  e.overset = layout.overset ? { text: layout.overset.text, lines: layout.overset.lines } : null;
+  if (e.overset) exportWarnings.push({ kind: 'overset', id: e.id, page: e.page, remaining: e.overset.lines });
+
+  const col = rgb(clamp((e.color || [0, 0, 0])[0], 0, 1), clamp((e.color || [0, 0, 0])[1], 0, 1), clamp((e.color || [0, 0, 0])[2], 0, 1));
+  const stroke = `${n(col.red)} ${n(col.green)} ${n(col.blue)} rg`;
+  const hScale = e.hScale && e.hScale !== 100 ? e.hScale : 100;
+
+  for (const pl of layout.placements) {
+    const ti = indexMap ? indexMap.get(pl.page) : pl.page;
+    const targetPage = pages ? pages[ti] : null;
+    if (!targetPage) continue;
+    // The wash fallback only ever applies to the page that still holds the
+    // original glyphs; the continuation frames had nothing to remove.
+    if (e.removal !== 'excise' && e.bg && pl.page === e.page) {
+      washRects(targetPage, [e.coverRect, ...(e.priorBoxes || [])], e.bg);
+    }
+    const fontKey = targetPage.node.newFontDictionary(font.name, font.ref);
+    const ops = [];
+    for (const ln of pl.lines) {
+      if (!ln.text) continue;
+      const lw = measure(ln.text);
+      let x = ln.x;
+      if (e.align === 'center') x = ln.x + (pl.width - lw) / 2;
+      else if (e.align === 'right') x = ln.x + (pl.width - lw);
+      ops.push(`q BT /${fontKey} ${n(size)} Tf ${stroke} `
+        + `${n(e.charSpacing || 0)} Tc ${n(hScale)} Tz `
+        + `1 0 0 1 ${n(x)} ${n(ln.y)} Tm ${font.encodeText(ln.text)} Tj ET Q`);
+    }
+    if (ops.length) appendPageOps(doc, targetPage, ops.join(' '));
+  }
+  void pageIndex;
+}
+
+async function applyTextEdit(doc, page, e, ctx = {}) {
+  const pageIndex = ctx.pageIndex != null ? ctx.pageIndex : e.page;
   const r = e.rect;
   const w = Math.abs(r[2] - r[0]);
   const font = await baseFont(doc, e.fontFamily || 'Helvetica');
@@ -671,6 +800,25 @@ async function applyTextEdit(doc, page, e) {
   // Horizontal scaling multiplies advance widths, so wrapping has to be
   // measured with it applied or a scaled line silently overflows the box.
   const measure = (t) => font.widthOfTextAtSize(t, size) * (hScale / 100);
+
+  /* ── Removal strategy ─────────────────────────────────────────────────────
+     Prefer TRUE REMOVAL of the owned source operators over a white cover. The
+     original operators are what search, copy-paste and a screen reader read, so
+     leaving them under a wash makes the file lie about its own contents. */
+  const removalInfo = await removeOwnedSource(doc, pageIndex, e);
+  e.removal = removalInfo.removal;
+  e.removedBlocks = removalInfo.removed;
+  if (removalInfo.removal === 'cover' && removalInfo.fallbackReason) {
+    exportWarnings.push({ kind: 'cover-fallback', id: e.id, page: e.page, reason: removalInfo.fallbackReason });
+  }
+
+  /* ── Linked frames (Thread frames) ────────────────────────────────────────
+     A story composed into an ordered chain of frames is drawn by its own path,
+     because the continuation frames may live on other pages. */
+  if (Array.isArray(e.frames) && e.frames.length > 1 && !e.boxId) {
+    return applyFramedEdit(doc, e, { pageIndex, pages: ctx.pages, indexMap: ctx.indexMap, font, size, measure });
+  }
+
   // Preflight BEFORE covering anything, so a font that genuinely cannot encode
   // the text fails the save here rather than leaving a cover rectangle with no
   // replacement on top of it. (Standard fonts substitute '?' for code points
@@ -679,38 +827,46 @@ async function applyTextEdit(doc, page, e) {
   const lines = block ? wrapBlockText(e.text, maxWidth, measure) : String(e.text || '').split(/\r?\n/);
   for (const line of lines) font.encodeText(line);
 
-  // Cover model: the original operators stay in the file — the edit hides
-  // them under opaque washes instead of deleting them. This is NOT secure
-  // redaction (the original text remains extractable underneath; use
-  // Redact + Sanitize for true removal). Every wash the preview paints is
-  // painted here: the fixed cover over the original footprint, any boxes a
-  // previous save drew into (move → save → move → save), and the current
-  // replacement box — which the user may have dragged anywhere.
-  // An edit that owns a text box: the box IS the replacement text and is saved
-  // as a real /FreeText annotation, so here we only hide the original run.
-  // Drawing the text a second time into the page content would double it.
-  // The original operators are never deleted — this is a cover, not a removal.
-  if (e.boxId) {
+  // Overset is a first-class result, never inferred from a viewer clipping text
+  // out of view. The UI shows it and export warns about it; the story text is
+  // never discarded from the model.
+  const boxH = Number(e.maxHeight) || size * 1.25;
+  const fit = fitCount(lines, boxH, size, e.lineHeight || size * 1.2);
+  e.consumed = fit;
+  e.total = lines.length;
+  e.overset = fit < lines.length ? { text: lines.slice(fit).join('\n'), lines: lines.length - fit } : null;
+  if (e.overset) exportWarnings.push({ kind: 'overset', id: e.id, page: e.page, remaining: e.overset.lines });
+
+  /* The removal decision above already decided whether the original survives.
+     When it was truly removed there is nothing left to hide, so no wash is
+     painted — the page genuinely no longer contains the old words. A wash is
+     only painted when removal was impossible (a scan whose glyphs are pixels,
+     or text inside a shared Form XObject). This is still NOT secure redaction:
+     a removed visible object does not prove every copy elsewhere is gone — use
+     Redact + Sanitize for confidentiality. */
+  /* A direct edit owns a paired /FreeText box. The box is the on-screen
+     affordance for dragging and re-editing, but the SAVED file must carry the
+     replacement as ORDINARY PAGE TEXT: an annotation is invisible to a text
+     search, a screen reader and copy-paste, so a file whose replacement lives
+     only in the annotation layer again lies about its own contents.
+
+     When the owned operators were truly removed there is nothing left to hide,
+     so we fall through and draw the replacement into the page content — exactly
+     as an unboxed edit does — and buildPdf omits the paired box from the file
+     (see `contentBoxes` below), keeping the text layer the single source of
+     truth. The box stays in the model so the edit remains draggable on screen.
+
+     A cover fallback still cannot remove the original, so there we keep the
+     wash plus the box annotation: the box draws the replacement over the wash
+     and there is no page text to duplicate it. */
+  if (e.boxId && removalInfo.removal !== 'excise') {
     if (!e.bg) return;
-    for (const c of [e.coverRect, ...(e.priorBoxes || [])]) {
-      if (!c) continue;
-      page.drawRectangle({
-        x: Math.min(c[0], c[2]), y: Math.min(c[1], c[3]),
-        width: Math.max(1, Math.abs(c[2] - c[0])), height: Math.max(1, Math.abs(c[3] - c[1])),
-        color: rgb(...e.bg), borderWidth: 0,
-      });
-    }
+    washRects(page, [e.coverRect, ...(e.priorBoxes || [])], e.bg);
     return;
   }
 
-  if (e.bg) {
-    for (const c of textEditWashes(e)) {
-      page.drawRectangle({
-        x: Math.min(c[0], c[2]), y: Math.min(c[1], c[3]),
-        width: Math.max(1, Math.abs(c[2] - c[0])), height: Math.max(1, Math.abs(c[3] - c[1])),
-        color: rgb(...e.bg), borderWidth: 0,
-      });
-    }
+  if (removalInfo.removal === 'cover' && e.bg) {
+    washRects(page, textEditWashes(e), e.bg);
   }
 
   if (!block) {
@@ -1095,13 +1251,14 @@ export async function buildPdf(doc, opts = {}) {
      draws nothing, so the image underneath is untouched. */
   await applyOcrLayer(doc, target, pages, indexMap);
 
-  /* Text edits — cover model. The original operators stay in the file; each
-     edit washes its original footprint plus its (possibly moved) replacement
-     box, then draws the replacement as ordinary selectable PDF text. */
+  /* Text edits — object-owned model. Each edit's owned source operators are
+     REMOVED (not covered) where that is safe, and the replacement is inserted;
+     a cover wash remains only as the fallback for pages whose glyphs are
+     pixels or live in a shared Form XObject. */
   for (const e of doc.textEdits || []) {
     const idx = indexMap ? indexMap.get(e.page) : e.page;
     if (idx == null || !pages[idx]) continue;
-    await applyTextEdit(target, pages[idx], e);
+    await applyTextEdit(target, pages[idx], e, { pageIndex: idx, pages, indexMap });
   }
 
   /* Stamps (watermarks, header/footer, Bates) */
@@ -1154,8 +1311,22 @@ export async function buildPdf(doc, opts = {}) {
   }
 
   /* Annotations */
+  /* A direct edit whose replacement was drawn into the PAGE CONTENT must not
+     also be saved as its paired /FreeText box. Writing both would put the same
+     words in the annotation layer as well, and an annotation is invisible to a
+     text search, a screen reader and copy-paste — so the file would show the new
+     text without containing it, which is the very lie this rewrite removes.
+     `FreeText` is in MANAGED_SUBTYPES, so the box's old byte-ref is not
+     preserved either: the annotation genuinely leaves the file. The box stays in
+     the model (doc.annots) so the edit is still draggable and re-editable on
+     screen until the next save round-trip. */
+  const contentBoxes = new Set();
+  for (const e of doc.textEdits || []) {
+    if (e.boxId && e.removal === 'excise') contentBoxes.add(e.boxId);
+  }
   const byPage = new Map();
   for (const a of doc.annots || []) {
+    if (contentBoxes.has(a.id)) continue;
     if (a.type === 'redact' && a.applied && !opts.flatten) {
       // Applied redactions become flat black boxes.
       const idx = indexMap ? indexMap.get(a.page) : a.page;
