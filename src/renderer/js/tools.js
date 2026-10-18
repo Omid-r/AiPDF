@@ -281,7 +281,10 @@ function onPointerMove(e) {
   const p = clientToPdf(i, e.clientX, e.clientY);
 
   if (drag.mode === 'draw') {
-    drag.cur = p;
+    // Shift held → constrain per tool (Photoshop): line snaps to 0/45/90°,
+    // rect/ellipse lock square. drag.cur drives drawPreview, so the rubber
+    // band shows the constrained shape live.
+    drag.cur = constrainDrawPt(state.tool, drag.start, p, e.shiftKey);
     if (STROKE_TOOLS.has(state.tool)) {
       // Distance is measured on screen so a fast flick tapers the same way at
       // every zoom level; the stored points stay in PDF space.
@@ -358,7 +361,9 @@ function onPointerUp(e) {
   clearPreview(d.i);
 
   if (d.mode === 'draw') {
-    const end = clientToPdf(d.i, e.clientX, e.clientY);
+    // Same Shift constraint as the preview, evaluated on the RELEASE event:
+    // preview and committed geometry can never disagree while Shift is held.
+    const end = constrainDrawPt(state.tool, d.start, clientToPdf(d.i, e.clientX, e.clientY), e.shiftKey);
     void finishDraw(d, end);
   } else if (d.mode === 'move' || d.mode === 'resize' || d.mode === 'moveText') {
     if (d.mode === 'moveText') {
@@ -382,6 +387,33 @@ function onPointerUp(e) {
 }
 
 /* ── Shape finishing ────────────────────────────────────────────────────── */
+
+/** Photoshop-style Shift constraints while dragging a draw tool:
+ *  - line / arrow / measure snap to the nearest 0°, 45° or 90° (horizontal,
+ *    vertical or diagonal) from the press point;
+ *  - rect / roundRect / ellipse lock to equal sides — a square / circle
+ *    ("proportional" for a rectangle).
+ *  Every other tool (text boxes, redact, freehand strokes …) passes through
+ *  untouched, and with Shift up the raw point is returned unchanged. Applied
+ *  to BOTH the live preview (onPointerMove → drag.cur) and the committed
+ *  geometry (onPointerUp → finishDraw), so preview and result always agree. */
+function constrainDrawPt(tool, start, p, shift) {
+  if (!shift) return p;
+  if (tool === 'line' || tool === 'arrow' || tool === 'measure') {
+    const dx = p.x - start.x, dy = p.y - start.y;
+    const len = Math.hypot(dx, dy);
+    if (!len) return p;
+    const step = Math.PI / 4;  // 45°
+    const ang = Math.round(Math.atan2(dy, dx) / step) * step;
+    return { x: start.x + Math.cos(ang) * len, y: start.y + Math.sin(ang) * len };
+  }
+  if (tool === 'rect' || tool === 'roundRect' || tool === 'ellipse') {
+    const dx = p.x - start.x, dy = p.y - start.y;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));   // square / circle
+    return { x: start.x + (dx < 0 ? -side : side), y: start.y + (dy < 0 ? -side : side) };
+  }
+  return p;
+}
 
 /** Finish a press-drag-release draw. Async because the link tool opens a dialog
  *  to pick its destination before the annotation is created. */

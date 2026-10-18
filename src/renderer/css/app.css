@@ -2710,7 +2710,13 @@ body.tool-editText .textLayer span:hover {
   border-top: 1px solid color-mix(in srgb, var(--accent) 85%, transparent);
 }
 .guide-v::after {
-  content: ''; display: block; margin-left: 4px;
+  /* height:100% is load-bearing: this ::after is an EMPTY block (height 0),
+     and a border-LEFT on a zero-height box paints NOTHING in Chromium — the
+     vertical guide existed in the DOM but was invisible (the reported
+     "can't drag guide from the left ruler, it's not showing"; the horizontal
+     twin painted because border-top spans the width instead). The parent
+     .guide-v has a definite height (top/bottom:0), so % resolves. */
+  content: ''; display: block; height: 100%; margin-left: 4px;
   border-left: 1px solid color-mix(in srgb, var(--accent) 85%, transparent);
 }
 .guide:hover::after { border-color: var(--accent); }
