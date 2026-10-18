@@ -963,10 +963,10 @@ export function initRulers() {
   }
   // Guide drags start on the ruler strips themselves (Photoshop behaviour:
   // top strip pulls out a horizontal guide, left strip a vertical one).
-  const hStrip = $('#rulerH');
-  const vStrip = $('#rulerV');
-  if (hStrip) hStrip.addEventListener('pointerdown', (e) => beginGuideDrag(e, 'h'));
-  if (vStrip) vStrip.addEventListener('pointerdown', (e) => beginGuideDrag(e, 'v'));
+  // Guide pulls are routed ONCE, on the rulers layer (routeGuidePull above).
+  // The per-strip listeners were removed: with both attached, one press ran
+  // beginGuideDrag twice and the second onUp pushed a stray duplicate guide
+  // at the press position — the reported "vertical guide won't pull".
   if (RD.unit) {
     RD.unit.onclick = () => {
       const i = UNIT_ORDER.indexOf(currentRulerUnit());
@@ -1173,6 +1173,7 @@ function hideGuideHover() {
 
 function beginGuideDrag(e, orient, existing = null) {
   if (!rulersOn || e.button !== 0) return;
+  if (guideDrag) return;              // a drag is already in progress
   if (!activeDoc()) return;
   e.preventDefault();
   e.stopPropagation();
@@ -1182,7 +1183,6 @@ function beginGuideDrag(e, orient, existing = null) {
   if (!pd) return;
   const dim = orient === 'h' ? pd.h : pd.w;
   const scale = Math.max(0.05, currentScale());
-  const strip = orient === 'h' ? RG.vRect : RG.hRect;  // the strip whose axis reads this guide's value
   const wrap = pageEls.get(page)?.wrap;
   if (!wrap) return;
   const wrapRect = wrap.getBoundingClientRect();
@@ -1229,21 +1229,26 @@ function beginGuideDrag(e, orient, existing = null) {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     hideGuideHover();
-    const pt = guideDrag ? guideDrag.pt : guide.pt;
-    const kill = guideDrag ? guideDrag.delete : false;
+    // Judge the drop by the RELEASE event, not the last processed pointermove:
+    // coalesced moves made the stale values land short — or keep a stale
+    // over-the-strip delete flag, which cancelled fast vertical pulls.
+    const finalPt = snapGuidePt(
+      toPt(orient === 'h' ? ev.clientY : ev.clientX), dim, orient, page, existing?.id,
+    );
+    const kill = overRuler(ev);
     preview.remove();
     guideDrag = null;
     const list = guidesOf();
     if (!list) { renderGuides(); return; }
-    if (kill || overRuler(ev)) {
+    if (kill) {
       if (existing) {
         const at = list.findIndex((x) => x.id === existing.id);
         if (at >= 0) list.splice(at, 1);
       }
     } else if (existing) {
-      existing.pt = pt;
+      existing.pt = finalPt;
     } else {
-      guide.pt = pt;
+      guide.pt = finalPt;
       list.push(guide);
     }
     guidesDirty = true;

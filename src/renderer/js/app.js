@@ -54,6 +54,9 @@ async function boot() {
   // Uploaded fonts are stored on disk; re-register them before anything lists
   // font names, so a restart does not silently drop them.
   await loadStoredUserFonts();
+  // Warm the system font index at boot: the Direct Editor's "Local fonts"
+  // group fills from this cache the moment a panel opens (no first-open lag).
+  listSystemFonts().catch(() => {});
 
   applyTheme();
   // Window chrome metrics come from main so the CSS reserves exactly the right
