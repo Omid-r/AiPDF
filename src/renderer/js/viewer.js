@@ -1046,7 +1046,9 @@ export function initRulers() {
       const hr = RD.hc.getBoundingClientRect();
       const vr = RD.vc.getBoundingClientRect();
       const hit = hitFromRects(e, hr, vr, RULER_TOL);
-      showGuideHover(hit === 'h' || hit === 'v' ? hit : null, e, hr, vr);
+      // Hold Alt over the strip to preview the SWAPPED guide (Photoshop).
+      const want = hit && e.altKey ? flipOrient(hit) : hit;
+      showGuideHover(want, e, hr, vr);
     };
     RD.layer.addEventListener('pointermove', hoverMove);
     scroller.addEventListener('pointermove', hoverMove, { passive: true });
@@ -1126,6 +1128,9 @@ function setRulersReady(on) {
 let guidesDirty = false;
 let guideDrag = null;   // active drag state, null when idle
 let guideSeq = 0;
+
+/** The other guide orientation — the Photoshop Alt-swap axis. */
+const flipOrient = (o) => (o === 'h' ? 'v' : 'h');
 
 function guidesOf() {
   const doc = activeDoc();
@@ -1240,17 +1245,21 @@ function beginGuideDrag(e, orient, existing = null) {
   if (!rulersOn || e.button !== 0) return;
   if (guideDrag) return;              // a drag is already in progress
   if (!activeDoc()) return;
-  // Photoshop shortcut: hold Alt while pulling from a ruler to swap the
-  // guide orientation (top ruler → vertical guide, left ruler → horizontal).
-  // Only applies to new pulls; moving an existing guide keeps its orientation.
-  if (!existing && e.altKey) orient = orient === 'h' ? 'v' : 'h';
+  // Photoshop shortcut: hold Alt to SWAP the guide orientation — honoured
+  // both at the press (pull the other orientation straight off the ruler)
+  // and live during the drag (press or release Alt to rotate the guide in
+  // hand). Works for new pulls and while moving an existing guide alike:
+  // `baseOrient` stays the source's natural orientation so the toggle
+  // always flips against it no matter when Alt goes down or up.
+  const baseOrient = orient;
+  if (e.altKey) orient = flipOrient(orient);
   e.preventDefault();
   e.stopPropagation();
   hideGuideHover();
   const page = RG.ref >= 0 ? RG.ref : rulerRefPage();
   const pd = pageDims(page);
   if (!pd) return;
-  const dim = orient === 'h' ? pd.h : pd.w;
+  let dim = orient === 'h' ? pd.h : pd.w;
   const scale = Math.max(0.05, currentScale());
   const wrap = pageEls.get(page)?.wrap;
   if (!wrap) return;
@@ -1299,6 +1308,18 @@ function beginGuideDrag(e, orient, existing = null) {
 
   const onMove = (ev) => {
     if (!guideDrag) return;
+    // Live Alt: rotating the guide in hand mid-gesture (Photoshop). Flip
+    // against baseOrient, then re-seat the axis the position is measured on
+    // (h↔v swaps which client coordinate and which page dimension apply) and
+    // the preview's sizing class, so the guide re-orients under the pointer.
+    const want = ev.altKey ? flipOrient(baseOrient) : baseOrient;
+    if (want !== orient) {
+      orient = want;
+      dim = orient === 'h' ? pd.h : pd.w;
+      guide.orient = orient;
+      guideDrag.orient = orient;
+      preview.className = `guide guide-${orient} guide-drag`;
+    }
     guideDrag.pt = snapGuidePt(toPt(orient === 'h' ? ev.clientY : ev.clientX), dim, orient, page, existing?.id);
     guideDrag.delete = overRuler(ev);
     place(guideDrag.pt);
@@ -1339,6 +1360,7 @@ function beginGuideDrag(e, orient, existing = null) {
       }
     } else if (existing) {
       existing.pt = finalPt;
+      existing.orient = orient;   // persists a mid-drag Alt rotation
     } else {
       guide.pt = finalPt;
       list.push(guide);
