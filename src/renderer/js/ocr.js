@@ -193,6 +193,24 @@ export function ocrEngineLabel(rec) {
   return 'Tesseract (local)';
 }
 
+/** Convert canvas-pixel bboxes to true PDF-space rects through the render
+ *  viewport's inverse — an identity on unrotated pages, and the correct
+ *  axis mapping on pages with /Rotate or a manual rotation. */
+function applyViewportRects(lines, vp) {
+  if (!vp) return lines;
+  const cvt = (bb) => {
+    const pts = [[bb.x0, bb.y0], [bb.x1, bb.y0], [bb.x1, bb.y1], [bb.x0, bb.y1]]
+      .map(([x, y]) => vp.convertToPdfPoint(x, y));
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  };
+  for (const l of lines) {
+    if (l.bbox) l.pdfRect = cvt(l.bbox);
+    for (const w of l.words || []) if (w.bbox) w.pdfRect = cvt(w.bbox);
+  }
+  return lines;
+}
+
 /**
  * Recognise one page with the configured engine. Resolves with the stored
  * record. `onProgress` receives { status, progress } updates.
@@ -227,11 +245,12 @@ export async function ocrPage(pageIndex, langs = 'eng', onProgress) {
 
 /** Local engine path (Tesseract, 200 DPI render). */
 async function ocrPageTesseract(pageIndex, langs = 'eng', onProgress) {
-  const { renderPageToCanvas } = await import('./viewer.js');
+  const { renderPageToCanvas, pageRenderViewport } = await import('./viewer.js');
   const doc = activeDocRef();
   if (!doc) throw new Error('No document open');
+  const vp = await pageRenderViewport(pageIndex, 200);
   const canvas = await renderPageToCanvas(pageIndex, 200);
-  return ocrCanvas(canvas, langs, onProgress, pageIndex, 200);
+  return ocrCanvas(canvas, langs, onProgress, pageIndex, 200, vp);
 }
 
 /**
@@ -265,6 +284,14 @@ async function ocrPageAI(pageIndex, langs = 'eng', onProgress) {
   const { extractJson } = await import('./aijson.js');
   const parsed = extractJson(text, 'object');
   const lines = buildStructuredOcrLines(parsed);
+  // The AI reads the rendered image; its pixel bboxes live in the same
+  // (possibly rotated) canvas frame — map them into PDF space like the
+  // Tesseract path does.
+  if (lines.length) {
+    const { pageRenderViewport } = await import('./viewer.js');
+    const vp = await pageRenderViewport(pageIndex, dpi);
+    applyViewportRects(lines, vp);
+  }
 
   const plain = lines.length
     ? lines.map((l) => l.text).join('\n')
@@ -307,7 +334,7 @@ function extractLines(data) {
 }
 
 /** Recognise an arbitrary canvas and store the result for `pageIndex`. */
-export async function ocrCanvas(canvas, langs = 'eng', onProgress, pageIndex = null, dpi = null) {
+export async function ocrCanvas(canvas, langs = 'eng', onProgress, pageIndex = null, dpi = null, vp = null) {
   const { activeDoc } = await import('./store.js');
   const doc = activeDoc();
   const w = await getWorker(langs, onProgress);
@@ -324,6 +351,7 @@ export async function ocrCanvas(canvas, langs = 'eng', onProgress, pageIndex = n
     confidence: l.confidence ?? null,
     words: (l.words || []).map((wd) => ({ text: String(wd.text || ''), bbox: wd.bbox || null, confidence: wd.confidence ?? null })),
   })).filter((l) => l.bbox && l.text.trim());
+  if (vp) applyViewportRects(lines, vp);
 
   const rec = {
     text: (data.text || '').trim(),

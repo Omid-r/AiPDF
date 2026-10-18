@@ -1,0 +1,12 @@
+import { PDFDocument, PDFName } from '@cantoo/pdf-lib';
+import fs from 'node:fs';
+const bytes = fs.readFileSync('D:/Advertisement/ad/Ok/3/Sunmoon Media 4x12 Gorakha sadak yojana.pdf');
+const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+const page = doc.getPage(0);
+console.log('mediabox:', page.getWidth(), 'x', page.getHeight());
+console.log('/Rotate:', page.node.get(PDFName.of('Rotate'))?.toString() || 'not set');
+const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+const pdf = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false }).promise;
+const vp1 = await pdf.getPage(1).getViewport({ scale: 1 });
+console.log('pdfjs viewport (rotation applied):', Math.round(vp1.width), 'x', Math.round(vp1.height), '| rotation', vp1.rotation);
+process.exit(0);

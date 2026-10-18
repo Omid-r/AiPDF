@@ -243,13 +243,34 @@ export function flatOcrLines(lines, pageHeight, dpi = 200) {
     const ln = lines[li];
     const text = String(ln.text || '').trim();
     if (!text) continue;
+    const words = Array.isArray(ln.words) ? ln.words : [];
+
+    // Lines recognised on a rotated page already carry their true PDF-space
+    // rect (converted through the render viewport's inverse) — use it as-is.
+    if (Array.isArray(ln.pdfRect) && ln.pdfRect.length === 4 && ln.pdfRect.every(Number.isFinite)) {
+      const [px0, py0, px1, py1] = ln.pdfRect;
+      const wHs = words.map((w) => (w.pdfRect ? w.pdfRect[3] - w.pdfRect[1] : 0)).filter((h) => h > 0.5).sort((a, b) => a - b);
+      const med = wHs.length ? wHs[Math.floor(wHs.length / 2)] : (py1 - py0);
+      const size = clampNum(med / 0.72, 4, 96) || clampNum(py1 - py0, 4, 96);
+      flat.push({
+        li, text,
+        x: px0, end: px1,
+        top: py1, bottom: py0,
+        baseline: py0 + 0.23 * (py1 - py0),
+        size, rot: 0, style: styleKey('Helvetica', Math.round(size)),
+        family: 'Helvetica',
+        confidence: ln.confidence ?? null,
+        words,
+      });
+      continue;
+    }
+
     const bb = ln.bbox || {};
     const x0 = Number(bb.x0) || 0, x1 = Number(bb.x1) || 0;
     const y0 = Number(bb.y0) || 0, y1 = Number(bb.y1) || 0;
     if (x1 <= x0 || y1 <= y0) continue;
 
     // Median word height is the most reliable size signal Tesseract gives.
-    const words = Array.isArray(ln.words) ? ln.words : [];
     const hs = words.map((w) => (w.bbox?.y1 || 0) - (w.bbox?.y0 || 0)).filter((h) => h > 1).sort((a, b) => a - b);
     const med = hs.length ? hs[Math.floor(hs.length / 2)] : (y1 - y0);
     const boxH = (y1 - y0) * s;
@@ -286,6 +307,41 @@ export function ocrSplitSegments(flat) {
   const RULE_GLYPH = /^[|｜│︱︲]+$/;
   const out = [];
   for (const line of flat) {
+    // Words already carrying PDF-space rects (converted by the caller) cut
+    // straight at rule glyphs and wide gaps — no dpi rescale needed.
+    const pdfWords = (line.words || []).filter((w) => w && w.pdfRect && String(w.text || '').trim());
+    if (pdfWords.length >= 2) {
+      const ordered = pdfWords.slice().sort((a, b) => a.pdfRect[0] - b.pdfRect[0]);
+      const threshold = Math.max(line.size * 1.8, 9);
+      let cur = null;
+      const segs = [];
+      const push = () => {
+        if (cur && cur.words.length) {
+          const text = cur.words.map((w) => w.text).join(' ').replace(/\s+/g, ' ').trim();
+          if (text) segs.push({
+            x0: Math.min(...cur.words.map((w) => w.pdfRect[0])),
+            x1: Math.max(...cur.words.map((w) => w.pdfRect[2])),
+            text,
+          });
+        }
+        cur = null;
+      };
+      for (const w of ordered) {
+        const rule = RULE_GLYPH.test(String(w.text || '').trim());
+        if (rule) { push(); continue; }
+        if (cur && w.pdfRect[0] - cur.lastX1 >= threshold) push();
+        if (!cur) cur = { words: [], lastX1: w.pdfRect[0] };
+        cur.words.push(w);
+        cur.lastX1 = w.pdfRect[2];
+      }
+      push();
+      if (segs.length > 1) {
+        for (const seg of segs) {
+          out.push({ i: out.length, li: line.li, rect: [seg.x0, line.bottom, seg.x1, line.top], text: seg.text, size: line.size });
+        }
+        continue;
+      }
+    }
     const words = (line.words || []).filter((w) => w && w.bbox && String(w.text || '').trim());
     if (words.length < 2) {
       out.push({ i: out.length, li: line.li, rect: [line.x, line.bottom, line.end, line.top], text: line.text, size: line.size });

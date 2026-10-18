@@ -674,6 +674,19 @@ export function thumbSize(i) {
 
 /* ── Export helpers used by other modules ───────────────────────────────── */
 
+/** The viewport a page renders with at the given DPI (rotation included).
+ *  Exported for the OCR pipeline: recognition works in canvas pixels, and the
+ *  results must come back through this viewport's inverse to land in true PDF
+ *  user space on rotated pages. */
+export function pageRenderViewport(i, dpi = 150) {
+  const d = activeDoc();
+  return (async () => {
+    const p = await d.pdf.getPage(i + 1);
+    const rotation = (p.rotate || 0) + (d.pageRotate?.[i] || 0);
+    return p.getViewport({ scale: dpi / 72, rotation });
+  })();
+}
+
 export async function renderPageToCanvas(i, dpi = 150) {
   const d = activeDoc();
   const dbg = (s) => { try { (window.__aipdfOcrProgress || []).push(s); } catch { /* ignore */ } };
