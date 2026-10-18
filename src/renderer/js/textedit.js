@@ -74,6 +74,10 @@ function onEditorRefresh() {
   on('annots', () => { if (state.tool === 'editText') void renderEditableBlocks(); });
   on('change', () => { if (state.tool === 'editText') void renderEditableBlocks(); });
   on('tool', () => void renderEditableBlocks());
+  // Zoom changes the CSS scale the block rects are drawn at — without this the
+  // overlays keep the old scale's pixels and drift off the text ("the blocks
+  // are offset from the text").
+  on('zoom', () => { if (state.tool === 'editText') void renderEditableBlocks(); });
 }
 
 /**

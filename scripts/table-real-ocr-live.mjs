@@ -158,6 +158,41 @@ check('key cell texts present (bid no. / works / builder / amount)',
   (all('33701119') || all('grp')) && (all('upgrading') || all('blacktop')) && (all('mandali') || all('builders')) && (all('522,961') || all('18,522')),
   JSON.stringify(blocks.map((b) => String(b.text || '').replace(/\s+/g, ' ').slice(0, 20))));
 
+/* Zoom stability — the offset bug: blocks must re-render at the new scale and
+ * stay glued to the text. Arm the Direct Editor first (block overlays only
+ * exist in editText tool), compare each block's position RELATIVE to the page
+ * rectangle before and after zooming: the relative layout must not move more
+ * than ~1% of the page. */
+await ev(`window.__aipdfAction('tool:editText')`);
+await sleep(2000);
+const before = await ev(`(function(){
+  const pg = document.querySelector('#pages .page').getBoundingClientRect();
+  const blocks = [...document.querySelectorAll('.editable-text-block')];
+  return JSON.stringify({ pageW: pg.width, pageH: pg.height, pageL: pg.left, pageT: pg.top,
+    blocks: blocks.map((b) => { const r = b.getBoundingClientRect(); return { l: +( (r.left - pg.left) / pg.width ).toFixed(4), t: +(( r.top - pg.top ) / pg.height ).toFixed(4) }; }) });
+})()`);
+await ev(`window.__aipdfAction('view:zoomIn')`);
+await sleep(900);
+await ev(`window.__aipdfAction('view:zoomIn')`);
+await sleep(1200);
+const after = await ev(`(function(){
+  const pg = document.querySelector('#pages .page').getBoundingClientRect();
+  const blocks = [...document.querySelectorAll('.editable-text-block')];
+  return JSON.stringify({ pageW: pg.width, pageH: pg.height, pageL: pg.left, pageT: pg.top,
+    blocks: blocks.map((b) => { const r = b.getBoundingClientRect(); return { l: +( (r.left - pg.left) / pg.width ).toFixed(4), t: +(( r.top - pg.top ) / pg.height ).toFixed(4) }; }) });
+})()`);
+const B = JSON.parse(before || '{}'), A = JSON.parse(after || '{}');
+check('zoom changes the page scale (the test zoomed)', A.pageW > B.pageW * 1.15, `${B.pageW} -> ${A.pageW}`);
+let maxDrift = 0;
+if (B.blocks && A.blocks && B.blocks.length === A.blocks.length) {
+  for (let i = 0; i < B.blocks.length; i++) {
+    maxDrift = Math.max(maxDrift, Math.abs(B.blocks[i].l - A.blocks[i].l), Math.abs(B.blocks[i].t - A.blocks[i].t));
+  }
+}
+check('blocks keep their page-relative position across zoom (max drift ≤ 1%)',
+  B.blocks && A.blocks && B.blocks.length === A.blocks.length && maxDrift <= 0.01,
+  `blocks ${B.blocks?.length}/${A.blocks?.length}, maxDrift ${maxDrift.toFixed(4)}`);
+
 /* Visual proof: arm the Direct Editor and screenshot the block overlays. */
 await ev(`window.__aipdfAction('tool:editText')`, 'editText');
 await sleep(2500);

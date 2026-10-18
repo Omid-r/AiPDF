@@ -25,10 +25,10 @@ export function normalizeRect(r) {
  * A screen-TOP drag must therefore rewrite index 3, and a screen-BOTTOM drag
  * index 1. `left` and `right` behave the same in both spaces.
  */
-const MOVES_TOP = new Set([0, 1, 2]);
-const MOVES_BOTTOM = new Set([4, 5, 6]);
-const MOVES_LEFT = new Set([0, 6, 7]);
-const MOVES_RIGHT = new Set([2, 3, 4]);
+export const MOVES_TOP = new Set([0, 1, 2]);
+export const MOVES_BOTTOM = new Set([4, 5, 6]);
+export const MOVES_LEFT = new Set([0, 6, 7]);
+export const MOVES_RIGHT = new Set([2, 3, 4]);
 
 export function resizeRect(h, orig, p) {
   const nb = orig.slice();

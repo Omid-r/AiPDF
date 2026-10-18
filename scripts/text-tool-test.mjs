@@ -250,6 +250,7 @@ let h = await handlePoint(1);
 if (h) {
   const before = await selBox();
   await drag(h.x, h.y, h.x, h.y + 40, { expect: '.handle' });
+  console.log('TRACE1', await ev('JSON.stringify(window.__dragTrace || [])'));
   const after = await selBox();
   check('top handle moves the top edge', after && near(after.top, before.top + 40), before && after ? `top ${before.top.toFixed(1)} -> ${after.top.toFixed(1)} (want +40)` : 'no box');
   check('top handle leaves the bottom edge alone', after && near(after.bottom, before.bottom), before && after ? `bottom ${before.bottom.toFixed(1)} -> ${after.bottom.toFixed(1)}` : 'no box');
