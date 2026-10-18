@@ -40,6 +40,7 @@ export const DEFAULT_SETTINGS = {
   chromeHidden: false,
   measureUnit: 'cm',             // cm | mm | in | pt — PDF space is 1/72 inch
   ocrLang: 'eng+nep',            // default recognition: English + Nepali (auto-detects both)
+  favoriteFonts: [],             // starred font families — surface in every font picker
   color: '#ffe066',
   fillColor: '#cfe3ff',           // default fill for new shapes
   fillEnabled: false,             // shapes are unfilled until the user asks

@@ -124,6 +124,8 @@ const P = {
   ruler: 'M3.5 16.5L16.5 3.5l4 4L7.5 20.5zM9 15l1.5 1.5M12 12l1.5 1.5M15 9l1.5 1.5M18 6l1.5 1.5',
   // Marquee: corner brackets of a selection rectangle (Area Direct Edit).
   marquee: 'M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4M8 8h8v8H8z',
+  // Favourite (star) fonts.
+  star: 'M12 3.2l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.4l5.9-.8z',
 };
 
 const cache = new Map();

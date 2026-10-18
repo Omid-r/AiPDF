@@ -54,9 +54,6 @@ async function boot() {
   // Uploaded fonts are stored on disk; re-register them before anything lists
   // font names, so a restart does not silently drop them.
   await loadStoredUserFonts();
-  // Warm the system font index at boot: the Direct Editor's "Local fonts"
-  // group fills from this cache the moment a panel opens (no first-open lag).
-  listSystemFonts().catch(() => {});
 
   applyTheme();
   // Window chrome metrics come from main so the CSS reserves exactly the right
@@ -3110,59 +3107,138 @@ const TOOL_SIZE_FALLBACK = { borderWidth: 1.5, brushSize: 6, highlighterSize: 16
 /* ── Local fonts in the text/font pickers ──────────────────────────────── */
 
 let systemFacesPromise = null;
+// The full machine font list stays collapsed until the user asks for it —
+// "Show all fonts…" — so nothing scans ~400 fonts at boot or panel-open.
+let localFontsExpanded = false;
 function systemFaces() {
   systemFacesPromise ??= listSystemFonts().then((r) => r.faces || []);
   return systemFacesPromise;
 }
 
 /**
- * Give a font <select> a "Local fonts" group fed from the fonts installed on
- * this machine (Windows user + system font directories, indexed once by the
- * main process). Picking a face copies it into the app font store
- * (fonts.js addSystemFont) so it embeds on save exactly like an uploaded
- * font — the standard-14 fallback would write non-WinAnsi glyphs as "?".
+ * Give a font <select> favourites + local fonts.
+ *
+ * Groups, in order: the three standard families, anything registered
+ * (document-extracted or uploaded), ★ Favourites (saved in settings — no
+ * scan needed), and Local fonts — LAZY: a single "Show all fonts…" item
+ * until the user clicks it, so no machine-wide font scan happens at boot or
+ * panel-open and pages keep loading fast.
+ *
+ * Picking a local face copies it into the app font store (fonts.js
+ * addSystemFont) so it embeds on save exactly like an uploaded font — the
+ * standard-14 fallback would write non-WinAnsi glyphs as "?".
  * prevOnChange preserves whatever binding the picker already had; `apply`
- * receives the registered family for a fresh pick.
+ * receives the family for a fresh pick.
  */
 function attachLocalFonts(sel, apply, prevOnChange) {
-  const grp = el('optgroup', { label: 'Local fonts' });
-  sel.appendChild(grp);
-  const loading = el('option', { value: '__sysLoading__', text: 'Loading local fonts…' });
-  grp.appendChild(loading);
-  systemFaces().then((faces) => {
-    loading.remove();
-    if (!faces.length) { grp.remove(); return; } // no machine faces → no group at all
-    const cur = sel.value;
-    const present = new Set([...sel.options].map((o) => o.value));
-    const byFamily = new Map();
-    for (const f of faces) if (!byFamily.has(f.family)) byFamily.set(f.family, f);
-    for (const [family, face] of [...byFamily.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      if (present.has(family)) continue;
-      grp.appendChild(el('option', {
-        value: 'sys:' + family,
-        text: face.style ? `${family} (${face.style})` : family,
-        'data-sys-family': family,
-      }));
+  const STD = ['Helvetica', 'Times', 'Courier'];
+
+  /* ★ Favourites — names saved in settings; instant, no index needed. */
+  const fillFavourites = () => {
+    const old = sel.querySelector('optgroup[label="★ Favourites"]');
+    if (old) old.remove();
+    const favs = settings.favoriteFonts || [];
+    if (!favs.length) return;
+    const favGroup = el('optgroup', { label: '★ Favourites' });
+    for (const name of favs) {
+      if ([...sel.options].some((o) => o.value === name)) continue;
+      favGroup.appendChild(el('option', { value: 'fav:' + name, text: '★ ' + name, 'data-fav-name': name }));
     }
-    sel.value = cur; // the async fill must not move the picker
-    if (sel.value !== cur) sel.value = sel.options[0] ? sel.options[0].value : '';
-  }).catch((e) => {
-    grp.remove();
-    console.warn('[fonts] local font list unavailable:', e?.message || e);
+    if (favGroup.children.length) sel.appendChild(favGroup);
+  };
+  fillFavourites();
+
+  /* Local fonts — lazy. */
+  const grp = el('optgroup', { label: 'Local fonts' });
+  const showAll = el('option', {
+    value: '__showAll__',
+    text: localFontsExpanded ? 'Local fonts' : 'Show all fonts…',
   });
+  grp.appendChild(showAll);
+  sel.appendChild(grp);
+
+  const fillAll = () => {
+    systemFaces().then((faces) => {
+      if (!faces.length) { showAll.textContent = 'No local fonts found'; return; }
+      const cur = sel.value;
+      const present = new Set([...sel.options].map((o) => (o.dataset && o.dataset.sysFamily) || o.value));
+      const byFamily = new Map();
+      for (const f of faces) if (!byFamily.has(f.family)) byFamily.set(f.family, f);
+      const favs = new Set(settings.favoriteFonts || []);
+      const fams = [...byFamily.entries()].sort((x, y) => {
+        const fx = favs.has(x[0]) ? 0 : 1, fy = favs.has(y[0]) ? 0 : 1;
+        return fx - fy || x[0].localeCompare(y[0]);
+      });
+      grp.innerHTML = '';
+      for (const [family, face] of fams) {
+        if (present.has(family)) continue;
+        grp.appendChild(el('option', {
+          value: 'sys:' + family,
+          text: (favs.has(family) ? '★ ' : '') + (face.style ? `${family} (${face.style})` : family),
+          'data-sys-family': family,
+        }));
+      }
+      sel.value = cur; // the fill must not move the picker
+      if (sel.value !== cur) sel.value = sel.options[0] ? sel.options[0].value : '';
+    }).catch(() => { showAll.textContent = 'Local fonts unavailable'; });
+  };
+  if (localFontsExpanded) fillAll();
+
   sel.onchange = async () => {
     const opt = sel.selectedOptions && sel.selectedOptions[0];
-    const family = opt && opt.dataset ? opt.dataset.sysFamily : null;
-    if (!family) { if (prevOnChange) prevOnChange(); else apply(sel.value); return; }
-    const face = (await systemFaces()).find((f) => f.family === family);
-    if (!face) { toast('That font is no longer installed.', 'warn'); return; }
-    const r = await addSystemFont(face);
-    if (!r.ok) { toast(r.error || 'Could not register the local font.', 'err', 5000); return; }
-    opt.value = r.family;
-    opt.textContent = r.family;
-    delete opt.dataset.sysFamily;
-    apply(r.family);
+    if (opt && opt.value === '__showAll__') {
+      localFontsExpanded = true;
+      showAll.textContent = 'Loading local fonts…';
+      fillAll();
+      if (prevOnChange) prevOnChange(); else apply(sel.value);
+      return;
+    }
+    // A favourite that is not registered yet: resolve it from the machine's
+    // font index (built on demand) and register it like a local pick.
+    if (opt && opt.value.startsWith && opt.value.startsWith('fav:')) {
+      const family = opt.value.slice(4);
+      if (customFontFamilies().includes(family)) { if (prevOnChange) prevOnChange(); else apply(family); return; }
+      const face = (await systemFaces()).find((f) => f.family === family);
+      if (!face) { toast('That font is not installed on this machine any more.', 'warn'); return; }
+      const r = await addSystemFont(face);
+      if (!r.ok) { toast(r.error || 'Could not register the local font.', 'err', 5000); return; }
+      opt.value = r.family;
+      opt.textContent = r.family;
+      delete opt.dataset.favName;
+      if (prevOnChange) prevOnChange(); else apply(r.family);
+      return;
+    }
+    if (prevOnChange) prevOnChange(); else apply(sel.value);
   };
+}
+
+/** A ★ toggle for the font currently chosen in a picker — favourites are
+ *  saved in settings and surface in the ★ Favourites group of every picker. */
+function fontStarButton(getFamily) {
+  const btn = el('button', { type: 'button', class: 'icon-btn sm', title: 'Add to favourites' });
+  const paint = () => {
+    const on = (settings.favoriteFonts || []).includes(getFamily());
+    btn.innerHTML = svgIcon('star', 13, 1.8);
+    btn.classList.toggle('on', on);
+    if (on) btn.style.color = 'var(--accent)'; else btn.style.color = '';
+    btn.title = on ? 'Remove from favourites' : 'Add to favourites';
+  };
+  btn.onclick = () => {
+    const fam = getFamily();
+    if (!fam || ['Helvetica', 'Times', 'Courier'].includes(fam)) {
+      toast('The standard PDF fonts are always available.', 'info', 2600);
+      return;
+    }
+    settings.favoriteFonts = settings.favoriteFonts || [];
+    const at = settings.favoriteFonts.indexOf(fam);
+    if (at >= 0) settings.favoriteFonts.splice(at, 1);
+    else settings.favoriteFonts.push(fam);
+    saveSettings();
+    paint();
+    toast(at >= 0 ? 'Removed from favourites' : `★ ${fam} — added to favourites`, 'ok', 2000);
+  };
+  paint();
+  return btn;
 }
 
 /* Foxit's Typewriter tool panel: Font, Size, Text colour, Bold / Italic style
@@ -3208,7 +3284,7 @@ function textPropsGroup(get, set) {
   align.value = get.align || 'left';
   align.onchange = () => set.align(align.value);
 
-  g.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Font' }), el('div', { class: 'pr-c' }, [fam])]));
+  g.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Font' }), el('div', { class: 'pr-c', style: { display: 'flex', gap: '4px', alignItems: 'center' } }, [fam, fontStarButton(() => get.fontFamily)])]));
   g.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Size' }), el('div', { class: 'pr-c' }, [size])]));
   g.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Text colour' }), el('div', { class: 'pr-c' }, [colour])]));
   g.appendChild(el('div', { class: 'prop-row' }, [el('label', { text: 'Style' }), el('div', { class: 'pr-c' }, [el('div', { class: 'flex' }, [bBtn, iBtn])])]));
@@ -3386,7 +3462,7 @@ function renderToolProps(host, panel) {
           sel.onchange = () => applyDirectFormat({ fontFamily: sel.value });
           attachLocalFonts(sel, (v) => applyDirectFormat({ fontFamily: v }), sel.onchange);
           return sel;
-        })()]),
+        })(), fontStarButton(() => (directEditorState() || {}).fontFamily || (settings.textFont || 'Helvetica'))]),
       ]),
       el('div', { class: 'prop-row' }, [
         el('label', { text: 'Size' }),

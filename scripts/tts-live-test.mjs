@@ -179,15 +179,40 @@ await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Es
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
 await sleep(300);
 
-/* 4 — Direct Editor font dropdown gains a Local fonts group.
+/* 4 — Direct Editor font dropdown: LAZY local fonts.
       Escape the settings dialog first, then arm the Direct Editor so its
       property panel (with the font select) is rendered. The check targets the
-      panel's own font select — the one whose options include Helvetica. */
+      panel's own font select — the one whose options include Helvetica. By
+      default the Local fonts group must be LAZY (a single "Show all fonts…"
+      item — no machine-wide scan); picking that item expands the full list. */
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
 await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
 await sleep(300);
 await ev(`window.__aipdfAction('tool:editText')`, 'armEditor');
 await sleep(900);
+const fontSel = await ev(`(function(){
+  const sels = [...document.querySelectorAll('select')].filter((s) =>
+    [...s.options].some((o) => o.value === 'Helvetica') && [...s.options].some((o) => o.value === 'Times'));
+  const s = sels.find((x) => !!x.offsetParent) || sels[0];
+  if (!s) return null;
+  const group = [...s.children].find((c) => c.tagName === 'OPTGROUP' && /local fonts/i.test(c.label || ''));
+  return JSON.stringify({ found: !!group, lazyItem: group ? group.children[0]?.textContent : '', n: group ? group.children.length : 0, selIndex: sels.indexOf(s) });
+})()`, 'fontSel');
+const fd = (() => { try { return JSON.parse(fontSel); } catch { return null; } })();
+check('font dropdown is lazy by default (Show all fonts…, no full scan)',
+  !!fd && fd.found && /show all fonts/i.test(fd.lazyItem || '') && fd.n === 1, fontSel || 'no select');
+
+/* Expand: pick the "Show all fonts…" item and fire the change. */
+await ev(`(function(){
+  const sels = [...document.querySelectorAll('select')].filter((s) =>
+    [...s.options].some((o) => o.value === 'Helvetica') && [...s.options].some((o) => o.value === 'Times'));
+  const s = sels.find((x) => !!x.offsetParent) || sels[0];
+  const opt = [...s.options].find((o) => o.value === '__showAll__');
+  if (!opt) return;
+  s.value = '__showAll__';
+  s.dispatchEvent(new Event('change'));
+})()`);
+await sleep(1200);
 const fonts = await ev(`(function(){
   const sels = [...document.querySelectorAll('select')].filter((s) =>
     [...s.options].some((o) => o.value === 'Helvetica') && [...s.options].some((o) => o.value === 'Times'));
@@ -197,10 +222,11 @@ const fonts = await ev(`(function(){
       group: g ? { faces: g.children.length, first: g.children[0] ? g.children[0].textContent : '' } : null };
   });
   return JSON.stringify(detail);
-})()`, 'fontCheck');
-const fd = (() => { try { return JSON.parse(fonts); } catch { return []; } })();
-check('Direct Editor font dropdown lists a Local fonts group', Array.isArray(fd) && fd.some((x) => x.group && x.group.faces > 0),
-  JSON.stringify(fd));
+})()`, 'fontExpand');
+const fdx = (() => { try { return JSON.parse(fonts); } catch { return []; } })();
+check('Show all fonts… expands the Local fonts group with the machine faces',
+  Array.isArray(fdx) && fdx.some((x) => x.group && x.group.faces > 50),
+  JSON.stringify(fdx));
 
 /* 5 — View ribbon: rulers + read-aloud buttons, real icons. */
 await ev(`(function(){ const b=[...document.querySelectorAll('#modeTabs .mode-tab')].find((x) => x.textContent.trim()==='View'); if(b) b.click(); })()`);
