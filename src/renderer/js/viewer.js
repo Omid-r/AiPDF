@@ -965,6 +965,8 @@ export function initRulers() {
   RD.layer = layer;
   RD.hc = $('#rulerHCanvas');
   RD.vc = $('#rulerVCanvas');
+  RD.h = $('#rulerH');
+  RD.v = $('#rulerV');
   RD.mh = $('#rulerMarkH');
   RD.mv = $('#rulerMarkV');
   RD.toggle = $('#rulerToggle');
@@ -988,36 +990,86 @@ export function initRulers() {
   }
   syncRulerUnitChip();
 
-  // Guide pull routing on the whole rulers layer: the strips are only ~24px
-  // wide and a click a couple of pixels outside them used to die silently.
-  // Deciding by position (with a little tolerance) covers the edges and the
-  // corner gap. Vertical drags are the common miss — the left strip is narrow
-  // and easy to undershoot.
-  const routeGuidePull = (e) => {
-    if (!rulersOn || e.button !== 0) return;
-    if (e.target.closest && e.target.closest('.ruler-chip')) return; // the chip keeps its own click
-    const hr = RD.hc.getBoundingClientRect();
-    const vr = RD.vc.getBoundingClientRect();
-    const tol = 8;
+  // Guide pull routing: the strips are only ~24px wide and a press a couple
+  // of pixels outside them used to die silently. The rulers layer itself is
+  // pointer-events:none (only the strips + corner take events) and it is a
+  // SIBLING of .pages — so an undershoot to the right of the left strip hits
+  // the page and never bubbles to the layer at all. The tol band below was
+  // therefore dead code, and the narrow left strip was far easier to miss
+  // than the wide top strip: the reported "left-to-right guide won't pull".
+  // Fix: route on the shared scroller (capture phase) by POSITION, so the
+  // tolerance band and the corner gap are real hit area, and the pull wins
+  // over Hand pan / draw tools that also listen under the press.
+  const RULER_TOL = 8;
+  const hitFromRects = (e, hr, vr, tol) => {
     const inH = e.clientY >= hr.top - tol && e.clientY <= hr.bottom + tol && e.clientX >= hr.left - tol;
     const inV = e.clientX >= vr.left - tol && e.clientX <= vr.right + tol && e.clientY >= vr.top - tol;
-    // The corner belongs to whichever strip the pointer is closer to.
-    if (inH && (!inV || Math.abs(e.clientY - hr.bottom) < Math.abs(e.clientX - vr.right))) beginGuideDrag(e, 'h');
-    else if (inV) beginGuideDrag(e, 'v');
+    if (inH && (!inV || Math.abs(e.clientY - hr.bottom) < Math.abs(e.clientX - vr.right))) return 'h';
+    if (inV) return 'v';
+    return null;
   };
+  const rulerHit = (e) => {
+    if (!RD.hc || !RD.vc) return null;
+    return hitFromRects(e, RD.hc.getBoundingClientRect(), RD.vc.getBoundingClientRect(), RULER_TOL);
+  };
+  const routeGuidePull = (e) => {
+    if (!rulersOn || e.button !== 0) return;
+    if (e.target && e.target.closest) {
+      if (e.target.closest('.ruler-chip')) return; // the chip keeps its own click
+      // An existing guide owns its own press: its node listener moves it.
+      // Without this, a guide parked within the tolerance band (page flush to
+      // the viewport edge) would be misread by POSITION as a fresh pull from
+      // the strip — the capture listener runs before the node's own handler
+      // and stopPropagation() would then starve the move.
+      if (e.target.closest('.guide')) return;
+    }
+    const hit = rulerHit(e);
+    if (hit) beginGuideDrag(e, hit);
+  };
+  if (scroller) {
+    // Capture: runs before #pages tool handlers, so a tolerance-band press
+    // starting just off the strip still pulls a guide instead of panning or
+    // drawing. beginGuideDrag stopPropagation()s, so the layer fallback below
+    // never double-fires for the same press (and its guideDrag guard covers
+    // any path that still reaches it).
+    scroller.addEventListener('pointerdown', routeGuidePull, true);
+  }
   if (RD.layer) {
     RD.layer.addEventListener('pointerdown', routeGuidePull);
     // Hover affordance: a ghost guide follows the pointer while it is over a
-    // strip, so pulling is visible before the press.
-    RD.layer.addEventListener('pointermove', (e) => {
+    // strip, so pulling is visible before the press. The layer is a sibling
+    // of .pages, so a tolerance-band press to the RIGHT of the left strip
+    // lands on the page and would never light the ghost — mirror the same
+    // hit test on the scroller so hover matches routing.
+    const hoverMove = (e) => {
       if (!rulersOn || guideDrag) { hideGuideHover(); return; }
       const hr = RD.hc.getBoundingClientRect();
       const vr = RD.vc.getBoundingClientRect();
-      const overH = e.clientY >= hr.top && e.clientY <= hr.bottom && e.clientX >= hr.left - 8;
-      const overV = !overH && e.clientX >= vr.left && e.clientX <= vr.right && e.clientY >= vr.top - 8;
-      showGuideHover(overH ? 'h' : overV ? 'v' : null, e, hr, vr);
-    });
+      const hit = hitFromRects(e, hr, vr, RULER_TOL);
+      showGuideHover(hit === 'h' || hit === 'v' ? hit : null, e, hr, vr);
+    };
+    RD.layer.addEventListener('pointermove', hoverMove);
+    scroller.addEventListener('pointermove', hoverMove, { passive: true });
     RD.layer.addEventListener('pointerleave', hideGuideHover);
+  }
+
+  // Direct strip listeners — the most reliable target for guide pulls.
+  // The capture/scroller/layer listeners remain as fallbacks for the
+  // tolerance band and corner gap. Each strip passes its own orientation,
+  // so a press on the narrow left strip can never be missed by bubbling.
+  if (RD.h) {
+    RD.h.addEventListener('pointerdown', (e) => {
+      if (!rulersOn || e.button !== 0) return;
+      if (e.target && e.target.closest && e.target.closest('.ruler-chip')) return;
+      beginGuideDrag(e, 'h');
+    });
+  }
+  if (RD.v) {
+    RD.v.addEventListener('pointerdown', (e) => {
+      if (!rulersOn || e.button !== 0) return;
+      if (e.target && e.target.closest && e.target.closest('.ruler-chip')) return;
+      beginGuideDrag(e, 'v');
+    });
   }
 
   scroller.addEventListener('pointermove', (e) => {
@@ -1188,6 +1240,10 @@ function beginGuideDrag(e, orient, existing = null) {
   if (!rulersOn || e.button !== 0) return;
   if (guideDrag) return;              // a drag is already in progress
   if (!activeDoc()) return;
+  // Photoshop shortcut: hold Alt while pulling from a ruler to swap the
+  // guide orientation (top ruler → vertical guide, left ruler → horizontal).
+  // Only applies to new pulls; moving an existing guide keeps its orientation.
+  if (!existing && e.altKey) orient = orient === 'h' ? 'v' : 'h';
   e.preventDefault();
   e.stopPropagation();
   hideGuideHover();
@@ -1227,9 +1283,19 @@ function beginGuideDrag(e, orient, existing = null) {
   const live = existing ? document.querySelector(`.guide[data-gid="${CSS.escape(existing.id)}"]`) : null;
   if (live) live.style.visibility = 'hidden';
 
-  const overRuler = (ev) =>
-    (RG.hRect && ev.clientY >= RG.hRect.top && ev.clientY <= RG.hRect.bottom)
-    || (RG.vRect && ev.clientX >= RG.vRect.left && ev.clientX <= RG.vRect.right);
+  // Live rects, not the RG.hRect/RG.vRect cache: the cache is only refreshed
+  // on the next animation frame, so right after a scroll it still describes
+  // the old viewport. Judging the drop against stale rects could read a legit
+  // page drop as "over the ruler" and silently discard a brand-new pull —
+  // another face of "could not be pulled from the ruler".
+  const overRuler = (ev) => {
+    if (!RD.hc || !RD.vc) return false;
+    const hr = RD.hc.getBoundingClientRect();
+    const vr = RD.vc.getBoundingClientRect();
+    const tol = 4;
+    return (ev.clientY >= hr.top - tol && ev.clientY <= hr.bottom + tol && ev.clientX >= hr.left - tol)
+      || (ev.clientX >= vr.left - tol && ev.clientX <= vr.right + tol && ev.clientY >= vr.top - tol);
+  };
 
   const onMove = (ev) => {
     if (!guideDrag) return;
@@ -1238,9 +1304,22 @@ function beginGuideDrag(e, orient, existing = null) {
     place(guideDrag.pt);
     preview.classList.toggle('guide-kill', guideDrag.delete);
   };
-  const onUp = (ev) => {
+  const endDrag = () => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onCancel);
+  };
+  const onCancel = () => {
+    // The gesture was taken over (touch scroll, alert, …): drop the preview
+    // and unblock future pulls instead of wedging guide creation until reload.
+    endDrag();
+    hideGuideHover();
+    preview.remove();
+    if (live) live.style.visibility = '';
+    guideDrag = null;
+  };
+  const onUp = (ev) => {
+    endDrag();
     hideGuideHover();
     // Judge the drop by the RELEASE event, not the last processed pointermove:
     // coalesced moves made the stale values land short — or keep a stale
@@ -1270,6 +1349,7 @@ function beginGuideDrag(e, orient, existing = null) {
   guideDrag = { orient, page, id, pt: guide.pt, delete: false };
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onCancel);
 }
 
 /** Turn the rulers on or off. Safe to call from a menu action in app.js.
