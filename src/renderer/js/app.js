@@ -1105,6 +1105,9 @@ const TOOLS = [
   // settings.tool, referenced by the keymap and by CSS (body.tool-editText), so
   // renaming it would silently strand old settings. Only the label changes.
   ['editText', 'Direct Editor', 'editText'],
+  // Direct Editor companion: drag a rectangle on the page and ONLY the text
+  // inside it becomes editable (recognition runs for that region on scans).
+  ['editArea', 'Area Direct Edit', 'marquee'],
 ];
 
 /** Display name for a tool id. Used by the status bar and the properties pane,
@@ -1162,7 +1165,7 @@ function ribbonGroupsForMode() {
       // Foxit keeps Select + Edit text on Home, so both live here.
       { title: 'Tools', items: [
         // Foxit leads every tab with Hand then Select; Hand pans, Select picks.
-        ...toolButtons(['hand', 'select', 'editText']),
+        ...toolButtons(['hand', 'select', 'editText', 'editArea']),
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
       ] },
       { title: 'Comment & Markup', items: toolButtons(['highlight', 'underline', 'strikeout', 'squiggly', 'note', 'callout', 'textbox', 'areaHighlight']) },
@@ -1237,7 +1240,7 @@ function ribbonGroupsForMode() {
       ] },
     ];
     case 'Edit': return [
-      { title: 'Direct Editor', items: toolButtons(['editText', 'whiteout']) },
+      { title: 'Direct Editor', items: toolButtons(['editText', 'editArea', 'whiteout']) },
       { title: 'Links', items: [
         { icon: 'link', label: 'Add link', act: () => setTool('link') },
         { icon: 'trash', label: 'Remove links', act: () => onMenuAction('edit:removeLinks') },
@@ -4144,6 +4147,7 @@ const COMMANDS = [
   ['Comment', 'Signature', 'signature', 'tool:signature'],
   ['Comment', 'Redact', 'redact', 'tool:redact'],
   ['Edit PDF', 'Direct Editor', 'editText', 'tool:editText'],
+  ['Edit PDF', 'Area Direct Edit', 'marquee', 'tool:editArea'],
   ['Edit PDF', 'OCR — recognise current page', 'scan', 'ocr:page'],
   ['Edit PDF', 'Document fonts', 'font', 'view:fonts'],
   ['Edit PDF', 'Watermark…', 'stamp', 'stamp:watermark'],
@@ -4531,7 +4535,7 @@ function setTool(t) {
   // class must go on the canvas-wrap — it used to be toggled on #pages, where
   // the stylesheet never matched it, so drawing tools never got their cursor.
   const canvasWrap = $('#canvasWrap');
-  const drawTools = new Set(['rect', 'ellipse', 'line', 'arrow', 'ink', 'brush', 'highlighter', 'measure', 'redact', 'whiteout', 'textbox', 'callout', 'note', 'stamp', 'signature', 'image', 'whiteout', 'polygon', 'polyline', 'cloud', 'areaHighlight', 'roundRect']);
+  const drawTools = new Set(['rect', 'ellipse', 'line', 'arrow', 'ink', 'brush', 'highlighter', 'measure', 'redact', 'whiteout', 'textbox', 'callout', 'note', 'stamp', 'signature', 'image', 'whiteout', 'polygon', 'polyline', 'cloud', 'areaHighlight', 'roundRect', 'editArea']);
   canvasWrap.classList.toggle('tool-draw', drawTools.has(t));
   // The body class drives the editText hover feedback in CSS — every text run
   // gets a faint accent outline so users see they can type into the page.
@@ -4797,6 +4801,7 @@ async function onMenuAction(action, payload) {
     case 'tool:brush': case 'tool:highlighter': case 'tool:formatPainter': case 'tool:eyedropper':
     case 'tool:eraser': case 'tool:stamp': case 'tool:image': case 'tool:signature':
     case 'tool:redact': case 'tool:whiteout': case 'tool:measure': case 'tool:editText':
+    case 'tool:editArea':
     // Vertex + rounded shape tools have no native menu items today (the ribbon
     // buttons call setTool directly) but must stay dispatchable so the action
     // bus, command palette and future menu entries reach the same tools.

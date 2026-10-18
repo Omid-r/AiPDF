@@ -107,7 +107,9 @@ export function clearEditRegion() {
 }
 
 function onMarqueeDown(e) {
-  if (!state.editRegionMode || e.button !== 0) return;
+  // Armed two ways: the Direct Editor panel's "Select area" toggle, or the
+  // dedicated Area Direct Edit tool on the ribbon (next to Direct Editor).
+  if ((!state.editRegionMode && state.tool !== 'editArea') || e.button !== 0) return;
   const pageDiv = e.target.closest ? e.target.closest('.page') : null;
   if (!pageDiv) return;
   e.preventDefault();
@@ -150,6 +152,11 @@ function onMarqueeDown(e) {
       page,
       rect: [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)],
     };
+    // The Area Direct Edit tool hands off to the Direct Editor itself: the
+    // region's blocks are on screen and clickable the moment the marquee closes.
+    if (state.tool === 'editArea' && window.__aipdfAction) {
+      window.__aipdfAction('tool:editText');
+    }
     const doc = activeDoc();
     // A scan that has not been recognised yet: recognition runs on the whole
     // page once (Tesseract needs the full render), but only the marquee's

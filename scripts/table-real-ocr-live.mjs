@@ -256,6 +256,23 @@ await sleep(600);
 const afterClearN = await ev(`document.querySelectorAll('.editable-text-block').length`);
 check('Clear area restores all blocks', afterClearN === 16, `${afterClearN}`);
 
+/* ── The Area Direct Edit TOOL (ribbon icon next to Direct Editor) ───────── */
+/* Arming the tool and dragging the marquee must filter the same way, then
+ * hand off to the Direct Editor so the region's cells are clickable. */
+await ev(`window.__aipdfAction('tool:editArea')`);
+await sleep(400);
+check('Area Direct Edit tool arms', (await ev(`window.__aipdfState.tool === 'editArea'`)) === true);
+const mq2 = {
+  x0: Math.round(page.l + page.w * 0.04), y0: Math.round(page.t + page.h * 0.66),
+  x1: Math.round(page.l + page.w * 0.45), y1: Math.round(page.t + page.h * 0.93),
+};
+await dragM(mq2.x0, mq2.y0, mq2.x1, mq2.y1);
+await sleep(800);
+const toolAfter = await ev(`window.__aipdfState.tool`);
+const n2 = await ev(`document.querySelectorAll('.editable-text-block').length`);
+check('tool marquee filters blocks and hands off to the Direct Editor',
+  toolAfter === 'editText' && n2 >= 2 && n2 <= 8, `tool=${toolAfter}, blocks=${n2}`);
+
 /* Visual proof: arm the Direct Editor and screenshot the block overlays. */
 await ev(`window.__aipdfAction('tool:editText')`, 'editText');
 await sleep(2500);
