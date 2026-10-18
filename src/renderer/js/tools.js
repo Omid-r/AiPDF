@@ -6,7 +6,7 @@ import {
 } from './viewer.js';
 import { makeAnnot, svgEl, normalizeRect, sweptQuads, renderPageAnnotations as renderAnnots } from './annots.js';
 import { translateTextEdit, textEditDrawBox } from './textblocks.js';
-import { MOVES_TOP, MOVES_BOTTOM, MOVES_LEFT, MOVES_RIGHT } from './geometry.js';
+import { resizeRect } from './geometry.js';
 import { clamp, rgbToCss, rgbToHex, hexToRgb, toast, el } from './util.js';
 import { openInlineTextbox } from './textedit.js';
 import { pickStamp, pickSignature, pickImage } from './stamps.js';
