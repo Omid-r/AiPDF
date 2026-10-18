@@ -39,6 +39,7 @@ export const DEFAULT_SETTINGS = {
   ribbonMode: 'expanded',
   chromeHidden: false,
   measureUnit: 'cm',             // cm | mm | in | pt — PDF space is 1/72 inch
+  ocrLang: 'eng+nep',            // default recognition: English + Nepali (auto-detects both)
   color: '#ffe066',
   fillColor: '#cfe3ff',           // default fill for new shapes
   fillEnabled: false,             // shapes are unfilled until the user asks
@@ -169,6 +170,8 @@ export const state = {
   },
   search: { open: false, query: '', caseSensitive: false, wholeWord: false, matches: [], index: -1 },
   ai: { dockOpen: false, messages: [], busy: false, mode: 'chat' },
+  editRegion: null,       // { page, rect: [x0,y0,x1,y1] } — marquee-limited editing area
+  editRegionMode: false,  // armed: the next page drag draws the marquee
   busy: false,
 };
 

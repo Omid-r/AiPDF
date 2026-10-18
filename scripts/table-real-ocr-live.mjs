@@ -193,6 +193,69 @@ check('blocks keep their page-relative position across zoom (max drift ≤ 1%)',
   B.blocks && A.blocks && B.blocks.length === A.blocks.length && maxDrift <= 0.01,
   `blocks ${B.blocks?.length}/${A.blocks?.length}, maxDrift ${maxDrift.toFixed(4)}`);
 
+/* ── Marquee area select — "edit this region only" ──────────────────────── */
+/* The Direct Editor panel's Select-area button: drag a rectangle over the
+ * bottom-right of the page (amount cell + remarks) — only the blocks inside
+ * it remain editable, and the region outline is drawn. */
+const armBtn = await ev(`(function(){
+  const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Select area');
+  if (b) { b.click(); return true; }
+  return false;
+})()`);
+await sleep(400);
+check('Select area button present in the Direct Editor panel', armBtn === true);
+
+const pageRect = await ev(`(function(){
+  const r = document.querySelector('#pages .page').getBoundingClientRect();
+  return { l: r.left, t: r.top, w: r.width, h: r.height };
+})()`);
+const page = { l: pageRect.l, t: pageRect.t, w: pageRect.w, h: pageRect.h };
+const dragM = async (x0, y0, x1, y1) => {
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: x0, y: y0, button: 'left', clickCount: 1 });
+  const steps = 8;
+  for (let s = 1; s <= steps; s++) {
+    await send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', button: 'left',
+      x: Math.round(x0 + ((x1 - x0) * s) / steps),
+      y: Math.round(y0 + ((y1 - y0) * s) / steps),
+    });
+    await sleep(30);
+  }
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x1, y: y1, button: 'left' });
+  await sleep(400);
+};
+const mq = {
+  x0: Math.round(page.l + page.w * 0.5), y0: Math.round(page.t + page.h * 0.68),
+  x1: Math.round(page.l + page.w * 0.98), y1: Math.round(page.t + page.h * 0.93),
+};
+await dragM(mq.x0, mq.y0, mq.x1, mq.y1);
+await sleep(600);
+const mqState = await ev(`(function(){
+  const pg = document.querySelector('#pages .page').getBoundingClientRect();
+  const blocks = [...document.querySelectorAll('.editable-text-block')].map((b) => {
+    const r = b.getBoundingClientRect();
+    return { l: (r.left - pg.left) / pg.width, t: (r.top - pg.top) / pg.height, r: (r.right - pg.left) / pg.width, b: (r.bottom - pg.top) / pg.height };
+  });
+  const box = document.querySelector('.edit-region-box');
+  return JSON.stringify({ n: blocks.length, blocks, outline: !!box, region: window.__aipdfState.editRegion, pagePt: window.__aipdfState.docs[0]?.pageSizes?.[0] });
+})()`);
+const M = JSON.parse(mqState || '{}');
+check('marquee limits the editable blocks to the selected region (3–9 blocks, was 16)',
+  M.n >= 3 && M.n <= 9, `${M.n}: ${JSON.stringify((M.blocks || []).length)}`);
+check('every remaining block intersects the marquee area',
+  (M.blocks || []).every((b) => b.l < 0.98 && b.r > 0.5 && b.t < 0.93 && b.b > 0.68),
+  JSON.stringify(M.blocks));
+check('the active region outline is drawn', M.outline === true);
+
+/* Clear area → the full block list returns. */
+await ev(`(function(){
+  const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Clear area');
+  if (b) b.click();
+})()`);
+await sleep(600);
+const afterClearN = await ev(`document.querySelectorAll('.editable-text-block').length`);
+check('Clear area restores all blocks', afterClearN === 16, `${afterClearN}`);
+
 /* Visual proof: arm the Direct Editor and screenshot the block overlays. */
 await ev(`window.__aipdfAction('tool:editText')`, 'editText');
 await sleep(2500);

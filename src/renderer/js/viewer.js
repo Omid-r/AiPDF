@@ -975,6 +975,38 @@ export function initRulers() {
   }
   syncRulerUnitChip();
 
+  // Guide pull routing on the whole rulers layer: the strips are only ~24px
+  // wide and a click a couple of pixels outside them used to die silently.
+  // Deciding by position (with a little tolerance) covers the edges and the
+  // corner gap. Vertical drags are the common miss — the left strip is narrow
+  // and easy to undershoot.
+  const routeGuidePull = (e) => {
+    if (!rulersOn || e.button !== 0) return;
+    if (e.target.closest && e.target.closest('.ruler-chip')) return; // the chip keeps its own click
+    const hr = RD.hc.getBoundingClientRect();
+    const vr = RD.vc.getBoundingClientRect();
+    const tol = 8;
+    const inH = e.clientY >= hr.top - tol && e.clientY <= hr.bottom + tol && e.clientX >= hr.left - tol;
+    const inV = e.clientX >= vr.left - tol && e.clientX <= vr.right + tol && e.clientY >= vr.top - tol;
+    // The corner belongs to whichever strip the pointer is closer to.
+    if (inH && (!inV || Math.abs(e.clientY - hr.bottom) < Math.abs(e.clientX - vr.right))) beginGuideDrag(e, 'h');
+    else if (inV) beginGuideDrag(e, 'v');
+  };
+  if (RD.layer) {
+    RD.layer.addEventListener('pointerdown', routeGuidePull);
+    // Hover affordance: a ghost guide follows the pointer while it is over a
+    // strip, so pulling is visible before the press.
+    RD.layer.addEventListener('pointermove', (e) => {
+      if (!rulersOn || guideDrag) { hideGuideHover(); return; }
+      const hr = RD.hc.getBoundingClientRect();
+      const vr = RD.vc.getBoundingClientRect();
+      const overH = e.clientY >= hr.top && e.clientY <= hr.bottom && e.clientX >= hr.left - 8;
+      const overV = !overH && e.clientX >= vr.left && e.clientX <= vr.right && e.clientY >= vr.top - 8;
+      showGuideHover(overH ? 'h' : overV ? 'v' : null, e, hr, vr);
+    });
+    RD.layer.addEventListener('pointerleave', hideGuideHover);
+  }
+
   scroller.addEventListener('pointermove', (e) => {
     if (!rulersOn) return;
     const host = e.target && e.target.closest ? e.target.closest('.page') : null;
@@ -983,6 +1015,14 @@ export function initRulers() {
     RPt.over = true;
     scheduleRulers(false);
   }, { passive: true });
+  scroller.addEventListener('pointerleave', () => {
+    if (!rulersOn) return;
+    RPt.over = false;
+    scheduleRulers(false);
+  });
+  // Leaving the rulers layer hides the hover ghost (pointermove on the layer
+  // already cleared it; this covers leaving through its edges).
+  if (RD.layer) RD.layer.addEventListener('pointerleave', hideGuideHover);
   scroller.addEventListener('pointerleave', () => {
     if (!rulersOn) return;
     RPt.over = false;
@@ -1094,11 +1134,49 @@ function snapGuidePt(pt, dim, orient, page, excludeId) {
   return clamp(best, 0, dim);
 }
 
+/** Hover affordance: a ghost guide follows the pointer while it is over a
+ *  ruler strip, so "pulling" is visible before the press. */
+let guideHoverEl = null;
+function showGuideHover(orient, e, hr, vr) {
+  const doc = activeDoc();
+  if (!orient || !doc || guideDrag) { hideGuideHover(); return; }
+  const page = RG.ref >= 0 ? RG.ref : rulerRefPage();
+  const pd = pageDims(page);
+  const wrap = pageEls.get(page)?.wrap;
+  if (!pd || !wrap) { hideGuideHover(); return; }
+  const scale = Math.max(0.05, currentScale());
+  const wrapRect = wrap.getBoundingClientRect();
+  const dim = orient === 'h' ? pd.h : pd.w;
+  const client = orient === 'h' ? e.clientY : e.clientX;
+  const pt = clamp((client - (orient === 'h' ? wrapRect.top : wrapRect.left)) / scale, 0, dim);
+  if (!guideHoverEl || !guideHoverEl.isConnected) {
+    guideHoverEl = el('div', { class: 'guide guide-hover' });
+    guideHoverEl.style.position = 'fixed';
+    guideHoverEl.style.zIndex = '89';
+    document.body.appendChild(guideHoverEl);
+  }
+  guideHoverEl.className = `guide guide-${orient} guide-hover`;
+  if (orient === 'h') {
+    guideHoverEl.style.left = `${wrapRect.left}px`;
+    guideHoverEl.style.width = `${wrapRect.width}px`;
+    guideHoverEl.style.top = `${wrapRect.top + pt * scale}px`;
+  } else {
+    guideHoverEl.style.top = `${wrapRect.top}px`;
+    guideHoverEl.style.height = `${wrapRect.height}px`;
+    guideHoverEl.style.left = `${wrapRect.left + pt * scale}px`;
+  }
+}
+function hideGuideHover() {
+  guideHoverEl?.remove();
+  guideHoverEl = null;
+}
+
 function beginGuideDrag(e, orient, existing = null) {
   if (!rulersOn || e.button !== 0) return;
   if (!activeDoc()) return;
   e.preventDefault();
   e.stopPropagation();
+  hideGuideHover();
   const page = RG.ref >= 0 ? RG.ref : rulerRefPage();
   const pd = pageDims(page);
   if (!pd) return;
@@ -1150,6 +1228,7 @@ function beginGuideDrag(e, orient, existing = null) {
   const onUp = (ev) => {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
+    hideGuideHover();
     const pt = guideDrag ? guideDrag.pt : guide.pt;
     const kill = guideDrag ? guideDrag.delete : false;
     preview.remove();

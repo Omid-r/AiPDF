@@ -2717,6 +2717,32 @@ body.tool-editText .textLayer span:hover {
 .guide-drag { pointer-events: none; }
 .guide-drag::after { border-color: var(--accent); }
 .guide-drag.guide-kill::after { border-color: #d43c3c; border-top-style: dashed; border-left-style: dashed; }
+.guide-hover { pointer-events: none; }
+.guide-hover::after { border-color: var(--accent); opacity: .55; border-top-style: dashed; border-left-style: dashed; }
+
+/* ── Marquee area select (region-limited direct edit) ────────────────── */
+.edit-marquee {
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  pointer-events: none;
+}
+.edit-region-box {
+  position: absolute;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  pointer-events: none;
+  z-index: 25;
+}
+.edit-region-tag {
+  position: absolute;
+  top: -18px; left: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+}
 .rulers.on .ruler-h { cursor: row-resize; }
 .rulers.on .ruler-v { cursor: col-resize; }
 

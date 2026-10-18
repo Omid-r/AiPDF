@@ -24,6 +24,11 @@ const cssFont = (size, family) => `${size}px ${cssFontStack(family)}`;
 export function initTextEditing() {
   const root = document.getElementById('pages');
   onEditorRefresh();
+  // Marquee area select (Direct Editor): with the mode armed, a drag on a page
+  // limits the editable blocks to that rectangle only — recognition runs first
+  // when the page is a scan. Capture phase: the marquee must win over the
+  // block buttons and the text layer beneath it.
+  root.addEventListener('pointerdown', onMarqueeDown, true);
   // Double-click on a text run opens the inline editor — from any tool where
   // the text layer is interactive (Select, Edit Text, and the text-markup
   // tools). Drawing tools disable the text layer entirely, so they cannot
@@ -80,6 +85,89 @@ function onEditorRefresh() {
   on('zoom', () => { if (state.tool === 'editText') void renderEditableBlocks(); });
 }
 
+/* ── Marquee area select (region-limited direct edit) ───────────────────── */
+
+let marqueeDrag = null;   // { page, x0, y0, previewEl }
+let marqueeSeq = 0;
+
+/** Arm/disarm the marquee: the next page drag selects the editable area. */
+export function toggleRegionMode() {
+  state.editRegionMode = !state.editRegionMode;
+  if (state.editRegionMode) {
+    toast('Drag a rectangle over the text you want to edit — only that area becomes editable.', 'info', 5000);
+  }
+  emit('selection');
+}
+
+export function clearEditRegion() {
+  state.editRegion = null;
+  state.editRegionMode = false;
+  void renderEditableBlocks();
+  emit('selection');
+}
+
+function onMarqueeDown(e) {
+  if (!state.editRegionMode || e.button !== 0) return;
+  const pageDiv = e.target.closest ? e.target.closest('.page') : null;
+  if (!pageDiv) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const page = Number(pageDiv.dataset.i);
+  marqueeDrag = { page, x0: e.clientX, y0: e.clientY };
+  const preview = el('div', { class: 'edit-marquee' });
+  preview.style.position = 'fixed';
+  preview.style.zIndex = '95';
+  document.body.appendChild(preview);
+  marqueeDrag.previewEl = preview;
+
+  const onMove = (ev) => {
+    if (!marqueeDrag) return;
+    const x = Math.min(marqueeDrag.x0, ev.clientX);
+    const y = Math.min(marqueeDrag.y0, ev.clientY);
+    preview.style.left = `${x}px`;
+    preview.style.top = `${y}px`;
+    preview.style.width = `${Math.abs(ev.clientX - marqueeDrag.x0)}px`;
+    preview.style.height = `${Math.abs(ev.clientY - marqueeDrag.y0)}px`;
+  };
+  const onUp = async (ev) => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    const { x0, y0 } = marqueeDrag;
+    const x1 = ev.clientX, y1 = ev.clientY;
+    preview.remove();
+    marqueeDrag = null;
+    state.editRegionMode = false;
+    if (Math.abs(x1 - x0) < 8 || Math.abs(y1 - y0) < 8) { emit('selection'); return; } // a click is not a marquee
+    // toPdf expects PAGE-LOCAL CSS coordinates — the marquee corners are
+    // viewport-absolute, so they must be rebased onto the page wrap first
+    // (passing client-absolute values shifted the region by the page offset).
+    const wrap = document.querySelector(`.page[data-i="${page}"]`).getBoundingClientRect();
+    const a = toPdf(page, Math.min(x0, x1) - wrap.left, Math.min(y0, y1) - wrap.top);
+    const b = toPdf(page, Math.max(x0, x1) - wrap.left, Math.max(y0, y1) - wrap.top);
+    // App rect convention: [x0, yBottom, x1, yTop] with yBottom < yTop — the
+    // viewport flip makes toPdf's first corner carry the LARGER y, so sort.
+    state.editRegion = {
+      page,
+      rect: [Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y)],
+    };
+    const doc = activeDoc();
+    // A scan that has not been recognised yet: recognition runs on the whole
+    // page once (Tesseract needs the full render), but only the marquee's
+    // blocks become editable — which is the point.
+    if (doc?.pdf && !doc.ocr?.[page]) {
+      const native = await (async () => { try { return await getTextContent(page); } catch { return null; } })();
+      if (!native || !native.items.some((it) => it.str && it.str.trim())) {
+        toast('Recognising the selected area…', 'info', 2000);
+        try { await recognizePageForEditing(page); } catch { /* the empty notice offers a retry */ }
+      }
+    }
+    void renderEditableBlocks(page);
+    emit('selection');
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+}
+
 /**
  * Where a page's editable text comes from.
  *
@@ -104,7 +192,7 @@ export async function editableSource(pageIndex) {
       const found = detectTables(native, { page: pageIndex, pageW: width, pageH, ...(paths ? { paths } : {}) });
       const split = splitBlocksByCells(tc, native, found, width);
       tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: split.blocks, source: 'native' };
+      return { blocks: filterByRegion(pageIndex, split.blocks), source: 'native' };
     }
   } catch { /* fall through to OCR — an unreadable page is not an empty one */ }
 
@@ -121,7 +209,7 @@ export async function editableSource(pageIndex) {
        * native-text path does. */
       const split = splitOcrBlocksByCells(rec, ocr, width, height, pageIndex);
       tablesByBlocks.set(split.blocks, split.tables);
-      return { blocks: split.blocks, source: 'ocr' };
+      return { blocks: filterByRegion(pageIndex, split.blocks), source: 'ocr' };
     }
     return { blocks: [], source: 'ocr-empty' };
   }
@@ -285,6 +373,15 @@ function pageTables(pageIndex, blocks) {
   const known = tablesByBlocks.get(blocks);
   if (known) return known;
   return detectTables(blocks, tableDetectOptions(pageIndex));
+}
+
+/** Marquee filter: when an edit region is armed for this page, only blocks
+ *  whose cover intersects the rectangle survive — "edit this area only". */
+function filterByRegion(pageIndex, blocks) {
+  const region = state.editRegion && state.editRegion.page === pageIndex ? state.editRegion.rect : null;
+  if (!region || !blocks.length) return blocks;
+  const hit = (r) => r[0] < region[2] && r[2] > region[0] && r[1] < region[3] && r[3] > region[1];
+  return blocks.filter((b) => hit(b.coverRect || b.rect));
 }
 
 /** Rules are read from the ORIGINAL bytes, which never change for an open
@@ -497,6 +594,21 @@ export async function renderEditableBlocks(pageIndex = null) {
     }
     const grid = tableGridLayer(i, tables);
     if (grid) layer.appendChild(grid);
+    // The active marquee region: dashed outline + tag, so "edit this area
+    // only" is always visible while it lasts.
+    if (state.editRegion && state.editRegion.page === i) {
+      const rg = state.editRegion.rect;
+      const ra = toCss(i, rg[0], rg[3]);
+      const rb = toCss(i, rg[2], rg[1]);
+      const regionBox = el('div', { class: 'edit-region-box' }, [
+        el('span', { class: 'edit-region-tag', text: 'Editing area' }),
+      ]);
+      regionBox.style.left = Math.min(ra.x, rb.x) + 'px';
+      regionBox.style.top = Math.min(ra.y, rb.y) + 'px';
+      regionBox.style.width = Math.abs(rb.x - ra.x) + 'px';
+      regionBox.style.height = Math.abs(rb.y - ra.y) + 'px';
+      layer.appendChild(regionBox);
+    }
     if (!blocks.length) {
       // Silence is what made this tool look broken: with no block to click the
       // page simply appeared dead. Say why, and offer the way out.

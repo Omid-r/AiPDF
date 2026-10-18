@@ -12,7 +12,7 @@ import { indexDocumentFonts, resetDocumentFonts, resolveFontFor } from './fontre
 import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
 import { initSidebar, renderSidebar, setSidebar, renderSidebarChrome } from './sidebar.js';
 import { initTools, selectAnnot, transformAnnot, clearFormat } from './tools.js';
-import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout } from './textedit.js';
+import { initTextEditing, replaceAllInDocument, commitBlockEdit, editableBlocks, editableSource, applyDirectFormat, directEditorOpen, directEditorState, openDirectEditor, openEditorForEdit, recognizePageForEditing, mergeBlocksIntoParagraph, threadEditFrames, previewEditLayout, toggleRegionMode, clearEditRegion } from './textedit.js';
 import { runSearch, nextMatch, prevMatch, clearHighlights } from './search.js';
 import { loadFormFields, renderFormFields, startFieldPlacement, exportFormData, importFormData, resetForm } from './forms.js';
 import { watermarkDialog, headerFooterDialog, batesDialog, signatureDialog } from './stamps.js';
@@ -3338,6 +3338,24 @@ function renderToolProps(host, panel) {
     host.appendChild(el('div', { class: 'prop-group' }, [
       el('div', { class: 'prop-title', text: live ? 'Direct Editor — selection' : 'Direct Editor — style for next edit' }),
       el('div', { class: 'prop-row' }, [
+        el('div', { class: 'pr-c', style: { display: 'flex', gap: '6px', flexWrap: 'wrap' } }, [
+          el('button', {
+            type: 'button',
+            class: `mini-btn${state.editRegionMode ? ' primary' : ''}`,
+            text: state.editRegionMode ? 'Drag on the page…' : 'Select area',
+            title: 'Limit editing to a rectangle you draw on the page — OCR runs on that area only for scans.',
+            onclick: () => { toggleRegionMode(); renderContext(); },
+          }),
+          state.editRegion ? el('button', {
+            type: 'button',
+            class: 'mini-btn',
+            text: 'Clear area',
+            title: 'Back to editing the whole page',
+            onclick: () => { clearEditRegion(); renderContext(); },
+          }) : null,
+        ]),
+      ]),
+      el('div', { class: 'prop-row' }, [
         el('label', { text: 'Font' }),
         el('div', { class: 'pr-c' }, [(() => {
           // Standard families plus anything registered — a font extracted from
@@ -3656,7 +3674,7 @@ function directOcrGroup() {
 
   const lang = el('select', {});
   for (const l of OCR_LANGS) lang.appendChild(el('option', { value: l.id, text: l.label }));
-  lang.value = settings.ocrLang || 'eng';
+  lang.value = settings.ocrLang || 'eng+nep';
   lang.onchange = () => { settings.ocrLang = lang.value; saveSettings(); };
 
   const btn = el('button', { class: 'mini-btn primary', text: 'Recognize Text' });
@@ -4706,7 +4724,7 @@ async function onMenuAction(action, payload) {
     case 'ocr:page': {
       if (!doc) break;
       setSidebar('ocr');
-      import('./ocr.js').then((m) => m.ocrPage(doc.currentPage ?? 0, settings.ocrLang || 'eng').then(() => {
+      import('./ocr.js').then((m) => m.ocrPage(doc.currentPage ?? 0, settings.ocrLang || 'eng+nep').then(() => {
         toast('OCR finished — the recognised text is searchable and AI-ready', 'ok', 4500);
         renderSidebar();
         updateStatus();
@@ -4729,7 +4747,7 @@ async function onMenuAction(action, payload) {
       try {
         for (const p of pages) {
           setBusy(true, `OCR ${done + 1}/${pages.length}`);
-          await ocr.ocrPage(p, settings.ocrLang || 'eng');
+          await ocr.ocrPage(p, settings.ocrLang || 'eng+nep');
           done++;
           renderSidebar();
         }
