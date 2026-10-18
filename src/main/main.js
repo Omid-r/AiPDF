@@ -751,7 +751,14 @@ ipcMain.handle('ai:chat', async (_e, opts = {}) => {
       // protocol is parsed there (candidates/parts), while the OpenAI shape is
       // already answered here.
       if (opts.raw) return { ok: true, json: j };
-      return { ok: true, text: j.choices?.[0]?.message?.content || '' };
+      // Some gateways (Claude-style, notably) return content as an array of
+      // typed parts instead of a string — flatten to plain text or every
+      // string method downstream explodes.
+      const c = j.choices?.[0]?.message?.content;
+      const text = typeof c === 'string'
+        ? c
+        : Array.isArray(c) ? c.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('') : (c ? String(c) : '');
+      return { ok: true, text };
     }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -783,6 +790,38 @@ ipcMain.handle('ai:chat', async (_e, opts = {}) => {
       }
     }
     return { ok: true, text: out };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+// TTS proxy (Read Aloud). Unlike ai:chat this must return BINARY audio from
+// ElevenLabs / Fish Audio / OpenAI-compatible endpoints, base64-JSON from
+// Mistral, and raw JSON from voice-list endpoints — so it hands the renderer
+// base64 + content type and lets tts.js decode per provider. Same no-CORS,
+// custom-header-honoured rules as the chat proxy.
+ipcMain.handle('tts:request', async (_e, opts = {}) => {
+  try {
+    const res = await fetch(opts.url, {
+      method: opts.method || (opts.body ? 'POST' : 'GET'),
+      headers: opts.headers || {},
+      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { ok: false, status: res.status, error: t.slice(0, 500) };
+    }
+    if (opts.expect === 'json') {
+      return { ok: true, json: await res.json() };
+    }
+    const buf = await res.arrayBuffer();
+    let b64 = '';
+    const bytes = new Uint8Array(buf);
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      b64 += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + CHUNK, bytes.length)));
+    }
+    return { ok: true, audioBase64: b64, contentType: res.headers.get('content-type') || 'audio/mpeg' };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }

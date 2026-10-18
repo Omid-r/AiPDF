@@ -116,6 +116,12 @@ const P = {
   compress: 'M12 3v4M12 17v4M4 12h4M16 12h4M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3',
   book: 'M12 5C10 4 7 3.5 4 4v15c3-.5 6 0 8 1.5V5zM12 5c2-1 5-1.5 8-1v15c-3-.5-6 0-8 1.5',
   unlock: 'M6 11h12v9H6zM9 11V8a3 3 0 0 1 5.7-1.3M12 15v2',
+  // Read-aloud player: play / pause / stop (stroke-only, 24×24 grid).
+  play: 'M8 5.5v13l10.5-6.5z',
+  pause: 'M9 5v14M15 5v14',
+  stop: 'M7.5 7.5h9v9h-9z',
+  // Diagonal ruler with tick marks (View ▸ Show rulers).
+  ruler: 'M3.5 16.5L16.5 3.5l4 4L7.5 20.5zM9 15l1.5 1.5M12 12l1.5 1.5M15 9l1.5 1.5M18 6l1.5 1.5',
 };
 
 const cache = new Map();

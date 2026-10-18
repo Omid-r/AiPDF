@@ -8,15 +8,20 @@
  */
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { rmSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9548;
-const UD = path.join(ROOT, '.smoke', 'markup-ud');
-rmSync(UD, { recursive: true, force: true });
+/* A per-run user-data dir in the OS temp area. A fixed dir in the repo has to
+ * be bulk-deleted on every run, and a recursive delete of a user-data tree
+ * trips the environment's bulk-delete guard once it passes ~50 files — the
+ * suite then passes once and refuses to start afterwards. */
+const UD = path.join(os.tmpdir(), `aipdf-markup-${process.pid}-${Date.now()}`);
+mkdirSync(path.dirname(UD), { recursive: true });
 mkdirSync(path.dirname(UD), { recursive: true });
 
 const env = { ...process.env };

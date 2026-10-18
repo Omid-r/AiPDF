@@ -201,8 +201,76 @@ export function walkTextBlocks(src) {
   return blocks;
 }
 
-/* ── Rect maths ───────────────────────────────────────────────────────────── */
+/**
+ * One entry per text-SHOWING operator (`Tj`, `TJ`, `'`, `"`), with its own byte
+ * span and its own origin — the granularity excision actually needs.
+ *
+ * `walkTextBlocks` reports one block per `BT … ET`, which is the right unit for
+ * "this paragraph line" but the wrong unit for removal: a producer may lay out a
+ * whole table row inside a single BT/ET, positioning each cell with `Td`. Cutting
+ * that block because its FIRST origin fell inside the target rectangle deleted
+ * the neighbouring cell as well — the user edits one cell and loses the one next
+ * to it. Testing each show-text operator's own origin keeps the cut to the cell
+ * that owns it.
+ *
+ * A single operator that draws two cells' glyphs cannot be split without
+ * rewriting its string; that case is left intact (the block-level assignment
+ * already attributes such a run to one cell only).
+ */
+export function walkTextRuns(src) {
+  const toks = tokenize(src);
+  let ctm = IDENTITY;
+  const stack = [];
+  const runs = [];
+  let inText = false, tm = IDENTITY;
+  const operands = [];
+  const nums = (k) => operands.slice(-k).map((x) => (typeof x === 'object' ? 0 : x));
+  let operandStart = null;
 
+  for (const tk of toks) {
+    if (tk.t === 'num') { if (operandStart == null) operandStart = tk.s; operands.push(tk.v); continue; }
+    if (tk.t === 'name' || tk.t === 'str' || tk.t === 'hex' || tk.t === '[' || tk.t === ']' || tk.t === '{' || tk.t === '}' || tk.t === 'dictopen' || tk.t === 'dictclose') {
+      if (operandStart == null) operandStart = tk.s;
+      operands.push(tk);
+      continue;
+    }
+    if (tk.t !== 'op') { operands.length = 0; operandStart = null; continue; }
+    const op = tk.v;
+
+    switch (op) {
+      case 'q': stack.push(ctm.slice()); break;
+      case 'Q': ctm = stack.pop() || IDENTITY; break;
+      case 'cm': { const a = nums(6); if (a.length === 6) ctm = mul(ctm, a); break; }
+      case 'BT': inText = true; tm = IDENTITY; break;
+      case 'ET': inText = false; break;
+      case 'Tm': { const a = nums(6); if (a.length === 6) tm = a; break; }
+      case 'Td': case 'TD': {
+        const a = nums(2);
+        if (a.length === 2) tm = mul(tm, [1, 0, 0, 1, a[0], a[1]]);
+        break;
+      }
+      case 'T*': { const a = nums(1); tm = mul(tm, [1, 0, 0, 1, 0, -(a[0] ?? 0)]); break; }
+      case 'Tj': case 'TJ': case "'": case '"':
+        if (inText) {
+          // Device point = CTM applied to where the text matrix put the pen.
+          // Order matters: mul(ctm, tm), not mul(tm, ctm).
+          runs.push({
+            start: operandStart ?? tk.s,
+            end: tk.e,
+            origin: applyMatrix(mul(ctm, tm), 0, 0),
+            glyphs: 1,
+          });
+        }
+        break;
+      default: break;
+    }
+    operands.length = 0;
+    operandStart = null;
+  }
+  return runs;
+}
+
+/* ── Rect maths ───────────────────────────────────────────────────────────── */
 export function rectsIntersect(a, b) {
   return !(a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1]);
 }
@@ -353,7 +421,7 @@ export async function exciseText(PL, doc, pageIndex, rects, opts = {}) {
     const obj = doc.context.lookup(ref);
     const text = await decode(obj);
     if (text == null) continue;
-    const blocks = walkTextBlocks(text).filter((b) => b.glyphs > 0);
+    const blocks = walkTextRuns(text).filter((b) => b.glyphs > 0);
     const cuts = [];
     for (const b of blocks) {
       const [x, y] = b.origin;

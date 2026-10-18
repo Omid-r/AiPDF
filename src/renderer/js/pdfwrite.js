@@ -5,6 +5,7 @@ import { ANNOT_TYPES, INK_INTENTS, annotationState } from './annots.js';
 import { getCustomFont, getFontkit } from './fonts.js';
 import { wrapBlockText, blocksFromOcrLines, textEditWashes } from './textblocks.js';
 import { exciseText } from './textops.js';
+import { walkVectorPaths } from './tables.js';
 import { storyFromEdit, layoutStory, fitCount, normRect } from './story.js';
 
 const {
@@ -677,6 +678,57 @@ async function inflateBytes(bytes) {
   if (typeof DecompressionStream === 'undefined') return null;
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * The page's own ruling lines, read from its content stream.
+ *
+ * A table's grid is drawn, not implied: it is a set of stroked (or thin filled)
+ * segments in the page content. pdf.js does not expose those as geometry — it
+ * hands them to a canvas — so the only honest source is the stream itself, which
+ * is why this lives next to the excise path (same decoder, same tokenizer).
+ *
+ * Needed because text geometry alone cannot see the grid of a table whose cells
+ * are close together: such a row arrives as ONE text run, so there are no
+ * gutters to cluster and the columns are invisible. The rules are the only
+ * evidence left, and they are exact.
+ *
+ * Returns `{ h, v }` (horizontal / vertical segments) or null when the stream
+ * cannot be read — an encrypted or exotic file degrades to text-only detection
+ * rather than failing the whole editor.
+ */
+export async function pageRulePaths(doc, pageIndex) {
+  if (!doc?.bytes) return null;
+  try {
+    const pl = await PL.PDFDocument.load(doc.bytes.slice(0), { updateMetadata: false, ignoreEncryption: true });
+    const page = pl.getPage(pageIndex);
+    const entry = page.node.get(PL.PDFName.of('Contents'));
+    if (!entry) return null;
+    const resolved = pl.context.lookup(entry);
+    const refs = resolved instanceof PL.PDFArray
+      ? Array.from({ length: resolved.size() }, (_, i) => resolved.get(i))
+      : [entry];
+
+    const out = { h: [], v: [] };
+    for (const ref of refs) {
+      const obj = pl.context.lookup(ref);
+      if (!obj) continue;
+      const raw = obj.contents instanceof Uint8Array ? obj.contents
+        : (typeof obj.getContents === 'function' ? obj.getContents() : null);
+      if (!raw) continue;
+      const filter = obj.dict?.get?.(PL.PDFName.of('Filter'))?.toString() || '';
+      if (filter && !filter.includes('FlateDecode')) continue;   // unsupported filter
+      const buf = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      const bytes = filter.includes('FlateDecode') ? await inflateBytes(buf) : buf;
+      if (!bytes) continue;
+      const paths = walkVectorPaths(new TextDecoder('latin1').decode(bytes));
+      out.h.push(...paths.h);
+      out.v.push(...paths.v);
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /**

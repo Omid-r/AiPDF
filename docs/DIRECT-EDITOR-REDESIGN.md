@@ -368,6 +368,8 @@ What this implementation **does not** do, matching §12's exclusion list:
   coverage gate, which warns before a character would be lost rather than
   silently substituting `?`.
 - **Rich paragraph/list/table layout, automatic pagination, hyphenation.**
+  *Detecting* an existing table is supported (see §9); *generating* table layout,
+  paginating it and hyphenating it are not.
 - **PDF/A or PDF/UA certification, secure redaction, tagged-structure repair.**
   The panel's About text says this out loud: "Still not secure redaction: use
   Redact + Sanitize for that."
@@ -399,12 +401,207 @@ Not yet implemented from the research, tracked as remaining work:
 | File | Role |
 |---|---|
 | `src/renderer/js/story.js` | **new** — authoring + layout model, pure; `createEngine` reference API |
-| `src/renderer/js/pdfwrite.js` | object-owned removal, framed composition, content-vs-annotation boundary, export warnings |
-| `src/renderer/js/textedit.js` | record enrichment, `mergeBlocksIntoParagraph`, `threadEditFrames`, `previewEditLayout`, committed-block skip |
-| `src/renderer/js/textops.js` | `exciseText` content-stream decode fix |
+| `src/renderer/js/tables.js` | **new** — table/cell detection: `walkVectorPaths`, `tablesFromRules`, `clusterRows`/`splitRuns`/`tableFromRun`, `tableForBlock`/`cellAtPoint`/`tableLabel` |
+| `src/renderer/js/pdfwrite.js` | object-owned removal, framed composition, content-vs-annotation boundary, export warnings; `pageRulePaths` (content-stream rules for table detection) |
+| `src/renderer/js/textedit.js` | record enrichment, `mergeBlocksIntoParagraph`, `threadEditFrames`, `previewEditLayout`, committed-block skip; cell-scoped `openDirectEditor`; `askEditText` |
+| `src/renderer/js/textops.js` | `exciseText` content-stream decode fix; `walkTextRuns` — per-operator excision granularity |
+| `src/renderer/js/textblocks.js` | `wideSpace` — drop gutter-bridging spaces so a cell cannot glue to its neighbour; `textRuns` / `textItemBoxes`; `groupTextBlocks(…, only)` for item-subset grouping |
 | `src/renderer/js/annots.js` | overset badge, story frames, flow arrows, wash gating |
-| `src/renderer/js/app.js` | Story / Make paragraph / Composition panel, box→edit routing, truthful tooltip, `truthful:` parity guards |
+| `src/renderer/js/app.js` | Story / Make paragraph / Composition panel, box→edit routing, truthful tooltip, `truthful:` parity guards; Table group; `__aipdfGetTextEdits` / `__aipdfSaveAndExtract` test hooks |
 | `src/renderer/js/tools.js` | clicking a story frame or wash selects the edit |
-| `src/renderer/css/app.css` | `.block-order`, `.story-frame`, `.overset-badge` |
+| `src/renderer/css/app.css` | `.block-order`, `.story-frame`, `.overset-badge`, `.table-grid` / `.table-cell` / `.table-tag` / `.de-table-tag` |
 | `scripts/story-test.mjs`, `scripts/truthful-save-test.mjs`, `scripts/overset-badge-test.mjs` | **new** suites |
+| `scripts/table-detect-test.mjs`, `scripts/table-fixture-test.mjs`, `scripts/table-cell-test.mjs`, `scripts/make-table-fixture.mjs` | **new** suites + fixture generator |
 | `README.md` | "Object-owned editing — remove, don't cover" |
+
+---
+
+## 9. Table and cell recognition
+
+A PDF has no table. It has glyphs and lines. Everything a reader calls "a cell"
+is inferred, and every inference can be wrong in a way the user only discovers
+after saving. So the detector is built to under-report rather than over-report:
+a missed table costs the user one extra click to edit the row; a false table
+silently scopes their edit to a rectangle that does not correspond to anything.
+
+### 9.1 Two detectors, in priority order
+
+`src/renderer/js/tables.js` runs two independent detectors and merges them.
+
+**Ruled tables (`source: 'rules'`, authoritative).** `walkVectorPaths(src)` walks
+the page content stream with the same tokenizer and CTM stack
+(`q`/`Q`/`cm`) that `walkTextBlocks` and `exciseText` already rely on, and
+collects every near-axis-aligned stroke: `|dx| ≤ 0.75 && dy ≥ 1` is a vertical
+rule, `|dy| ≤ 0.75 && dx ≥ 1` a horizontal one. Both stroked paths and thin
+filled `re` bars count — a table drawn with filled rectangles has no `S` operator
+at all. Crossing rules form a **connected component**: two tables on one page are
+two components, and a page border is its own component. A component needs at
+least three distinct x and three distinct y coordinates to be a table, so a plain
+page border (2×2 coordinates) is a 1×1 box and is rejected. Rows are then built
+**top-down** from the component's y list, which is the opposite order to the PDF's
+bottom-up user space — this inversion is a real source of off-by-one bugs and is
+asserted directly by the fixture test.
+
+Because the grid comes from the drawing, a ruled table recovers **empty cells**.
+That matters: an empty cell is exactly where a user wants to type, and text
+clustering can never find it.
+
+**Borderless tables (`source: 'text'`).** Text geometry only. Blocks are
+clustered into rows (`clusterRows`), consecutive multi-block rows into a run
+(`splitRuns`), and columns inferred from gutters that **recur across rows**
+(`tableFromRun`). The gutter support threshold is what separates a table from
+prose that happens to align: a column boundary must be present in at least half
+the run's rows.
+
+### 9.2 The guards, and what each one is actually for
+
+| Guard | Rejects |
+|---|---|
+| fewer than 4 blocks, or fewer than 2 multi-block rows | a heading, a single row, a caption |
+| median block > 5 text lines | two-column **prose**, the classic false positive |
+| median row height > `max(medSize × 10, 120)` | stacked paragraphs, not cells |
+| fewer than 2 columns after clustering | a list, an indented block |
+| a gutter must recur in ≥ 50% of rows | one accidental wide space |
+
+Rule tables win: any text table whose bbox overlaps a rule table's bbox is
+dropped, because the ruled one is strictly more reliable and would otherwise be
+reported twice.
+
+There is deliberately **no snapping of text tables to nearby rules**. An earlier
+draft did snap, and a page border immediately turned a 2×2 text table into a
+page-sized grid. The comment in `tables.js` records why.
+
+### 9.3 Gutter-bridging spaces must be dropped, not split on
+The subtle bug this feature turned up is in `groupTextBlocks`, not in the
+detector. pdf-lib — and many real producers — position the next cell by emitting
+a **stretched space run**: in the fixture, `A1` is followed by a `" "` whose
+reported width is 87.9pt where a normal space is ~2.5pt.
+
+Left alone, that run is contiguous with the next cell under the line-merge test
+(`gap < size × 1.5` is false, but the merge only needs the *end* of the previous
+run to line up), so `A1 B1 C1` becomes one block. Breaking the line at the wide
+space is necessary but not sufficient: the space then survives as a block of its
+own, sitting over the gutter, and its `coverRect` overlaps both neighbours so no
+column boundary is found either.
+
+The fix is to treat such a run as **positioning, not content**, and drop it from
+the run stream entirely (`wideSpace()` in `textblocks.js`). A run of pure
+whitespace wider than 2em paints nothing; deleting it changes no visible pixel,
+and it removes both failure modes at once.
+
+### 9.4 One block per CELL, not per row
+
+Detection finds the grid; the block list still has to *use* it. A producer may
+lay out a whole table row inside a single `BT … ET`, positioning each cell with
+`Td` and gaps under 1.5em, so text-block grouping yields **one block per row**
+spanning every column in it. Clicking any cell then edited the entire row — the
+reported bug.
+
+`splitBlocksByCells` (textedit.js) rebuilds the blocks inside a table so there is
+one block per cell:
+
+- Every block whose centre lies in a table is replaced by the blocks formed from
+  **its own text items**, regrouped per cell. `groupTextBlocks(tc, width, idxs)`
+  takes an item subset but keeps each run's **page-level** index, so the pieces
+  carry real `itemIndices` — excision and the stable `key` still work.
+- Cells that receive no items stay **empty**. An empty cell is a place to type,
+  not a copy of its neighbour.
+- `cell.blocks` is then repointed at the new indices. Because the split changes
+  the array, the tables and the blocks are kept **paired** (`tablesByBlocks`,
+  a WeakMap) rather than re-detected — a fresh detection would report indices
+  into the array that no longer exists.
+
+Rules must come from the file, not from pdf.js: `pdfwrite.js` gains
+`pageRulePaths()`, which decodes the page's content streams and returns their
+segments (cached per document, since `doc.bytes` never changes). Without it the
+app could only cluster text gutters — and a merged row has no gutters at all, so
+the grid was invisible. This is also why the earlier `source: 'rules'` path was
+only exercised by the Node tests.
+
+### 9.5 Ownership stops at the cell boundary
+
+Two subtleties made "edit one cell, lose the one beside it" possible even after
+the split:
+
+1. **Excision granularity.** `exciseText` cut one `walkTextBlocks` entry per
+   `BT … ET` — which is a whole row when the producer emits it that way — if the
+   entry's **first** origin fell in the rect. `walkTextRuns` now reports one
+   entry per text-showing operator (`Tj`/`TJ`/`'`/`"`) with its own byte span and
+   its own origin, so only the operators the cell actually owns are cut.
+2. **The ownership rect.** A cell's glyphs can overflow their column by a point
+   or two, and the block rect follows the glyphs, so it reaches into the next
+   cell — and that neighbour's origin falls inside it. Each cell piece therefore
+   gets `ownRect` = its rect **clamped to the cell**, which is what
+   `commitBlockEdit` records as `sourceRects`. `coverRect` is left unclamped so
+   the wash still covers the overflow.
+
+The pair is asserted directly: editing `Q2` in a merged-row table saves with
+`P2abcdefghij` and `R2abcdefghij` intact.
+
+### 9.6 A cell edit is the existing object-owned edit, scoped
+No parallel model was invented. A cell commit writes exactly what a block commit
+writes, with the frame set to the cell:
+
+```js
+mode: 'flow',
+frames: [{ page, rect: cell.rect }],
+table: { id, row, col, rows, cols },
+```
+
+Consequences that follow for free, and are asserted rather than assumed:
+
+- The replacement is written as **ordinary page text** after the cell's own
+  operators are excised — `truthful-save` semantics, at cell granularity.
+- A cell too small for the replacement reports **overset** instead of clipping
+  (§3.3). The panel's Table group says so explicitly.
+- The paired on-screen box is still omitted from the saved file, so the text
+  layer stays the single source of truth.
+
+The UI surfaces the attribution rather than hiding it: blocks inside a cell get
+`.in-table` and `data-table/row/col`, their tooltip reads
+`Table 1 · R2C2 of 3×3`, a `.table-grid` overlay outlines the regions and cells
+while the Direct Editor is armed, and the open editor carries a `.de-table-tag`.
+
+### 9.7 Verification
+
+| Suite | Rows | Proves |
+|---|---|---|
+| `scripts/table-detect-test.mjs` | 31 | 3×3 / 2×2 detection, prose & paragraph rejection, `tableForBlock` / `cellAtPoint` / `tableLabel`, `walkVectorPaths` on stroked lines, filled `re` bars and `cm`-transformed rules, ruled-grid cell contents, page border is not a table |
+| `scripts/table-fixture-test.mjs` | 24 | the real `.fixtures/table.pdf`: rules extracted from a FlateDecode stream, blocks from pdf.js, three tables, 3×3 / 3×3 / 2×2 shapes, `A1→R0C0`, `C3→R2C2`, `X1`/`Y1` column attribution, no overlap, `cellAtPoint` inside `B2`, and that a merged row lands in ONE cell at the detection stage |
+| `scripts/table-cell-blocks-test.mjs` | 19 | the split: a 200pt row block becomes 9 cell blocks, `Q2→R1C1`, `P2`/`R2` are different cells of the same table, no cell claims two blocks, each block owns only its own items, the already-per-cell tables are untouched, nothing is lost or invented |
+| `scripts/table-cell-test.mjs` | 44 | live app over CDP: grid overlay, per-cell hit targets, **the ask step** (prefilled, names the cell, cancel records nothing), editor **scoped to the cell**, record carries `table` + single cell frame, and the **saved** file has the replacement, no `B2`, every neighbour intact — including the merged-row table, where `P2abcdefghij` and `R2abcdefghij` survive an edit to `Q2` |
+
+`npm run test:tables` runs the three Node suites; `npm run test:table-ui` runs the
+CDP one. The fixture is generated by `node scripts/make-table-fixture.mjs`.
+
+---
+
+## 10. Asking for the text before editing it
+
+Opening a block used to drop the caret straight into the text the detector had
+guessed at. The first keystroke then silently replaced that guess — and inside a
+table cell, "that guess" is the cell's entire contents. There is no undo for
+"the user typed one letter and the detector's guess was wrong".
+
+So when the text **is** detected there is something concrete to confirm, and the
+editor asks for it first (`askEditText` in `textedit.js`):
+
+- A modal shows the detected text, selected, with a hint naming where it came
+  from: `Detected text on page 1, Table 1 · R2C2 of 3×3.`
+- **Enter** applies for single-line text; multi-line text keeps Enter as a
+  newline and applies on **Ctrl+Enter**, matching the editor's own rule.
+- **Cancel / Esc** returns `null` and `openDirectEditor` returns immediately —
+  no editor, no record, no touched document.
+- The answer seeds the editor, which then behaves exactly as before (resize,
+  format, click away or Ctrl+Enter to commit).
+
+Two deliberate exclusions:
+
+- **An existing edit is not asked about again.** Its text was authored by the
+  user, not detected, so re-opening it goes straight to the editor.
+- **A block with no detected text is not asked about.** There is nothing to
+  confirm; the editor opens empty and the user types.
+
+Both are asserted: `direct-edit-test.mjs` proves the question is prefilled and
+that no editor exists until it is answered, and `table-cell-test.mjs` proves the
+cancel path leaves zero edits behind.

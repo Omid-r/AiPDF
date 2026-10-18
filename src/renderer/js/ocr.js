@@ -32,6 +32,7 @@ const BUNDLED = new Set(['eng', 'nep', 'hin', 'osd']);
 
 import { settings, activeDoc } from './store.js';
 import { aiReady, visionRequest } from './ai.js';
+import { buildStructuredOcrLines } from './textblocks.js';
 import { clamp } from './util.js';
 
 export const OCR_LANGS = [
@@ -49,14 +50,13 @@ export const OCR_ENGINES = [
 ];
 
 /** Prompt for the vision models: plain-text transcription, layout-aware. */
-const AI_OCR_PROMPT = `You are a precision OCR engine. Transcribe ALL text visible in this document page image.
+const AI_OCR_PROMPT = `You are a precision OCR engine. Analyse this document page image and return ONLY a JSON object — no commentary, no markdown fences:
+{"lines":[{"text":"...","bbox":{"x0":L,"y0":T,"x1":R,"y1":B}}],"tables":[{"cells":[{"row":0,"col":0,"text":"...","bbox":{"x0":L,"y0":T,"x1":R,"y1":B}}]}]}
 Rules:
-- Output plain text only. No commentary, no markdown fences, no page descriptions.
-- Preserve reading order (columns top-to-bottom, left-to-right) and paragraph breaks.
-- Keep table rows on one line each with " | " between cells.
-- Mark headings with a blank line before/after, keeping the original wording.
-- Reproduce numbers, dates, amounts and symbols exactly as printed.
-- If a word is unreadable, write your best guess.`;
+- bbox = that text's rectangle in THIS image's pixel coordinates (origin top-left, y grows down). Every line and every table cell needs one.
+- lines = all text that is NOT inside a table, in reading order, with paragraph breaks as separate entries.
+- tables: for EVERY table, one cell entry PER CELL — never one per row — each with its own bbox. Empty cells get an empty text but still a bbox.
+- Transcribe numbers, dates, amounts and symbols exactly as printed. Best guess for unreadable words.`;
 
 let T = null;            // Tesseract global
 let worker = null;       // cached worker
@@ -257,8 +257,21 @@ async function ocrPageAI(pageIndex, langs = 'eng', onProgress) {
   const text = await visionRequest(prompt, dataUrl);
   if (onProgress) onProgress({ status: 'recognised', progress: 1 });
 
+  /* The vision model returns structured output (lines + per-CELL table
+   * entries — the same idea as the user's proven PDF→Word flow). Parse it so
+   * doc.ocr carries a real line list; the Direct Editor's per-cell table
+   * split then works on AI-recognised pages exactly like Tesseract ones.
+   * Unparseable responses fall back to plain text (no lines). */
+  const { extractJson } = await import('./aijson.js');
+  const parsed = extractJson(text, 'object');
+  const lines = buildStructuredOcrLines(parsed);
+
+  const plain = lines.length
+    ? lines.map((l) => l.text).join('\n')
+    : String(text || '').trim();
   const rec = {
-    text: String(text || '').trim(),
+    text: plain,
+    lines: lines.length ? lines : undefined,
     confidence: null,
     langs,
     engine: 'ai',

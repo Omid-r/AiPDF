@@ -19,13 +19,17 @@ Mapped from the capabilities that define the category leaders:
 
 | Capability | What AiPDF does | Inspired by |
 | --- | --- | --- |
-| **View** | Fast pdf.js rendering, lazy page loading, text‑layer selection, thumbnails, bookmarks/outline, continuous & single‑page layouts, fit‑width/fit‑page, zoom, dark mode. | All leaders |
+| **View** | Fast pdf.js rendering, lazy page loading, text‑layer selection, thumbnails, bookmarks/outline, continuous & single‑page layouts, fit‑width/fit‑page, zoom, dark mode, **measurement rulers with draggable guides** — pull a guide straight out of a ruler (Photoshop‑style), it snaps to page edges/centre/other guides, moves by dragging and deletes by dragging back onto the ruler or double‑clicking (View ▸ Clear Guides). | All leaders |
 | **Comment** | Highlight, underline, strike‑through, squiggly, sticky notes, shapes (rect/ellipse/line/arrow), free‑ink, text boxes & callouts, stamps, signatures, images, measurement. **Real PDF annotations** are written with appearance streams so they render in any reader. | Acrobat / Foxit |
-| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
+| **Edit** | **Direct Editor** — Acrobat‑style in‑place text editing with a full Format panel (font, size, colour, bold/italic/underline, align incl. justify, line & character spacing, horizontal scaling). The font dropdown lists the **fonts installed on your machine** (grouped under *Local fonts*) alongside the standard families — picking one registers it so it embeds on save. **Tables are recognised** (ruled *and* borderless) so an edit inside a table is scoped to its **cell**, not the whole row — and the same cell scoping now works on **recognised scans**: OCR lines are cut at table-rule glyphs ("|" read by Tesseract) and word gutters, the grid is rebuilt from the recurring boundaries (header bands that sit at wrapped-line pitch are absorbed), and each cell becomes an independent block. With an AI key, recognition goes further: the vision model returns the table as **explicit per-cell entries** (the structure-aware idea from a proven PDF→Word flow), so cells arrive pre-separated. When the text is detected the editor **asks for the text first**, prefilled, before anything is replaced. On save the original run is **removed from the file** and the replacement is written as ordinary page text (see [Object-owned editing](#object-owned-editing--remove-dont-cover)); the block can be **dragged anywhere** on the page, merged into a paragraph, or threaded across frames and pages. Plus redaction, headers/footers, watermarks, Bates numbering, page background. | Acrobat Pro / Nitro |
 | **Organize** | Insert/delete/rotate/extract/reorder pages, merge documents, split, insert blank pages or pages from another PDF. | PDFelement / Nitro |
 | **Forms** | Read & fill existing AcroForm fields, create new text/checkbox/radio/dropdown/signature fields, export values to JSON/CSV. | Acrobat / PDF‑XChange |
-| **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), and remove security. | Acrobat / Nitro |
-| **AI assistant** | Summarize, translate, proofread, rewrite selections, ask questions about the open document. Responses include navigable **`[p.N]` citations** that jump to and flash the referenced passage. | Modern differentiator |
+| **Protect** | **AES‑256 encryption** (user/owner passwords), granular permissions (print/copy/modify/annotate/fill), manual redaction marks + apply/sanitize, and remove security. | Acrobat / Nitro |
+| **AI assistant** | Summarize, translate, proofread, rewrite selections, ask questions about the open document (or *all* open documents at once). Responses include navigable **`[p.N]` citations** that jump to and flash the referenced passage, plus **suggested follow‑up questions** under every answer. | Acrobat AI Assistant |
+| **AI Smart Redact** | One‑click scan of the current page or the whole document for sensitive data — emails, phones, SSNs/national IDs, credit cards (Luhn‑validated), IBANs, IPs, dates of birth, labelled ID numbers, street addresses and person names. A review checklist (all/none, per‑item) creates redaction marks over every located hit; "Mark + Apply & Sanitize" finishes the job in one step. Runs offline with pattern matching alone; with an AI key it also catches names, addresses and contextual data. | Foxit Smart Redact / Redactable |
+| **AI Contract Review** | Detects whether a document is an agreement, then reports parties, key terms (term, payment, renewal, termination, liability, governing law…), **risk flags** by severity (auto‑renewal, uncapped liability, unilateral clauses…), and "before you sign" action items — every finding cited with a clickable page jump. | Acrobat AI Contract Intelligence |
+| **AI Document Outline** | Builds a hierarchical outline of the document with page references; every entry jumps to its page. | UPDF mind map |
+| **Read aloud (TTS)** | Speaks your document from a floating player — **play/pause, stop, 0.5–2× speed and a live page indicator**. The local system voice works offline with no key; bring your own key for **ElevenLabs, Fish Audio, Mistral (Voxtral) or Google Gemini TTS** (or any OpenAI‑compatible `/audio/speech` endpoint). Selecting a provider auto‑fills its official base URL, **voices are fetched live with your key** ("Fetch voices"), and **Test voice** speaks a sample before you commit. Pages are split at sentence boundaries and read on with optional auto‑advance. | Acrobat Read Aloud / cloud TTS |
 
 ---
 
@@ -125,6 +129,39 @@ The text‑block panel exposes the three explicit actions the design calls for �
 join: space / line break / nothing), and **Continue on next page** (link frames) —
 plus a live composition readout of placed vs. overset characters.
 
+**4. Tables are recognised, so a cell edit stays inside its cell.** Clicking text
+inside a table edits the **cell**, not the block of text that happens to sit
+there. Two detectors run and the more reliable one wins:
+
+- **Ruled tables** are rebuilt from the page's own strokes (`source: 'rules'`),
+  walked from the content stream with the same CTM tracking the excise path uses.
+  A ruled table recovers **empty cells** too — exactly where you want to type.
+- **Borderless tables** are inferred from text geometry (`source: 'text'`): rows
+  from shared baselines, columns from gutters that **recur across rows**.
+
+**One block per cell — even when the file says otherwise.** A producer may lay a
+whole table row out inside a single text run, positioning each cell with `Td` and
+gaps under 1.5em. Text grouping then sees one block per row, and clicking any cell
+edited the entire row. The grid is authoritative, so blocks inside a table are
+rebuilt from their own text items **per cell**: one block per cell, empty cells
+stay empty, and ownership stops at the cell boundary — so editing one cell can no
+longer take its neighbour with it.
+
+It is deliberately conservative — two‑column prose, a single row, a caption and a
+plain page border are all rejected, because a false table would silently scope an
+edit to a rectangle that means nothing. The on‑page overlay labels each grid
+(`Table 1 · R2C2 of 3×3`), and a cell too small for the replacement is reported as
+**overset** rather than clipped. On save the cell's own text is excised and every
+neighbouring cell survives — see `scripts/table-cell-test.mjs` (32 checks), which
+asserts the saved file has the replacement, no `B2`, and `A1…C3`, `X1…Y2` intact.
+
+**5. It asks for the text before replacing it.** When the text *is* detected there
+is something concrete to confirm, so the editor shows it first — selected, and
+labelled with where it came from (`Detected text on page 1, Table 1 · R2C2 of
+3×3`) — and applies on Enter (Ctrl+Enter for multi‑line text). Cancelling leaves
+the document completely untouched: no editor, no edit record. A block with no
+detected text, and an edit you have already authored, go straight to the editor.
+
 Verified by `scripts/story-test.mjs` (the authoring + layout model, 42 checks),
 `scripts/truthful-save-test.mjs` (removal vs. covering, 14 checks),
 `scripts/reflow-test.mjs` (the content‑stream primitive) and the `--parity-test`
@@ -185,13 +222,16 @@ File · Edit · View · Comment · Edit PDF · Organize · Documents · Protect 
   Properties, Close, Exit.
 - **Edit** — Undo/Redo, Cut/Copy/Paste, Select All, Find, Preferences.
 - **View** — Zoom (In/Out, Actual Size, Fit Page, Fit Width, Reset), page
-  layout (Single/Continuous/Facing), Rotate, Dark mode, Presentation, panels.
+  layout (Single/Continuous/Facing), Rotate, Dark mode, Presentation,
+  **Read This Page Aloud**, **Read Aloud Settings…**, panels.
 - **Comment** — annotation & markup tools (Highlight…Redact, Stamp, Signature).
 - **Edit PDF** — content modification (Edit Text, Whiteout, OCR, Watermark,
   Header & Footer, Bates numbering).
 - **Organize** — page management (Insert, Extract, Delete, Rotate, Merge, Split).
 - **Documents** — batch document tools (see below).
-- **Forms**, **Protect** (encrypt / redact), **AI**, **Window**, **Help**.
+- **Forms**, **Protect** (AI Smart Redact, encrypt / redact), **AI** (Ask,
+  Agent, Summarize, Extract Data, Translate, Rewrite, Proofread, **Contract
+  Review**, **Document Outline**, Configure), **Window**, **Help**.
 
 Standard accelerators are used throughout: `Ctrl+N/O/S/P/W`, `Ctrl+Shift+S`,
 `Ctrl+Z` / `Ctrl+Shift+Z`, `Ctrl+F`, `Ctrl+D` (Document Properties),
@@ -408,6 +448,11 @@ Headless, assertion‑based checks (no display required):
 node scripts/smoke-pdf.mjs            # Node: pdf-lib ops (annot AP, encrypt AES-256, page ops, forms)
 node scripts/reflow-test.mjs          # Node: content-stream text engine (walk/group/excise primitives)
 node scripts/make-fixtures.mjs        # regenerate the test fixture PDF
+
+# Tables (detection + cell-scoped editing):
+npm run test:tables                   # Node: detector unit suite (31) + real fixture (24) + cell split (19)
+npm run test:table-ui                 # real app: ask-for-text, cell-scoped editor, truthful cell save (44)
+node scripts/make-table-fixture.mjs   # regenerate the ruled 3x3 + borderless 2x2 fixture
 
 # Inside the real Electron app (renderer + main IPC):
 npm start -- --boot-test             # clean boot, zero renderer errors

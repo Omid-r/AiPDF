@@ -80,7 +80,7 @@ const bare = flat.filter((x) => x.accelerator && !/\+/.test(x.accelerator));
 check('no bare-letter accelerators (they would hijack typing)', bare.length === 0,
   bare.length ? bare.map((b) => `${b.path}=${b.accelerator}`).join(', ') : `${flat.filter((x) => x.accelerator).length} modifier combos`);
 
-check('Help menu still offers the Start page', !!flat.find((x) => x.path === 'Help > Start page'));
+check('Help menu still offers the Start page', !!flat.find((x) => x.path.startsWith('Help > Start page')));
 
 try { fs.unlinkSync(PROBE); } catch { /* gone */ }
 

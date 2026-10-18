@@ -4,6 +4,7 @@ import { el, escapeHtml, miniMarkdown, toast, clamp, diffHtml } from './util.js'
 import { showModal, formRow } from './dialog.js';
 import { svgIcon } from './icons.js';
 import { createTextEditFromSelection } from './textedit.js';
+import { extractJson, normalizeFollowups, normalizeOutline } from './aijson.js';
 
 const MAX_CONTEXT_CHARS = 26000;
 
@@ -93,7 +94,9 @@ function selectSmart(cands, budget, pin, docOrder) {
   return chosen;
 }
 
-async function contextFor(scope, question = '') {
+// Exported for the doc-AI modules (contract.js) — returns { text, pages } with
+// [page N] markers that citations and card links resolve against.
+export async function contextFor(scope, question = '') {
   const doc = activeDoc();
   if (!doc) return { text: '', pages: [], docs: [] };
 
@@ -242,7 +245,8 @@ async function callAI(messages, onDelta) {
       if (!res || !res.ok) {
         throw new Error(res?.error ? res.error.slice(0, 300) : `AI request failed (${res?.status || '?'})`);
       }
-      return res.text || '';
+      // The proxy flattens part-array content, but never trust the wire shape.
+      return typeof res.text === 'string' ? res.text : '';
     } finally { unsub(); }
   }
 
@@ -579,6 +583,88 @@ export async function ask(question, scope = 'auto') {
       renderAnswer(aiEl, acc, ctx.pages);
     });
     renderAnswer(aiEl, text || '(no response)', ctx.pages);
+    // Acrobat AI Assistant-style suggested follow-ups — best-effort, never
+    // blocks or fails the answer itself.
+    if (text) suggestFollowups(aiEl, question, text, ctxScope);
+  } catch (e) {
+    renderAnswer(aiEl, `**Request failed.** ${escapeHtml(e.message)}`, []);
+    toast(e.message.slice(0, 160), 'err', 6000);
+  } finally {
+    state.ai.busy = false;
+    renderThinking(aiEl, false);
+    emit('ai');
+  }
+}
+
+/* ── Suggested follow-ups (Acrobat AI Assistant style) ──────────────────── */
+
+function renderFollowups(node, questions, scope) {
+  if (!node || !questions.length) return;
+  const wrap = el('div', { class: 'ai-followups' });
+  for (const q of questions) {
+    wrap.appendChild(el('button', {
+      class: 'ai-chip',
+      text: q,
+      title: 'Ask this follow-up',
+      onclick: () => { if (!state.ai.busy) ask(q, scope); },
+    }));
+  }
+  node.appendChild(wrap);
+  const host = node.closest('.ai-msgs');
+  if (host) host.scrollTop = host.scrollHeight;
+}
+
+async function suggestFollowups(node, question, answer, scope) {
+  try {
+    const out = await chatComplete([
+      { role: 'system', content: 'Given a question and its answer about a document, propose exactly 3 short follow-up questions the user would most likely ask next. Return ONLY a JSON array of strings — no commentary.' },
+      { role: 'user', content: `QUESTION: ${question}\n\nANSWER: ${String(answer).slice(0, 3000)}\n\nReturn ONLY the JSON array.` },
+    ], { temperature: 0.4, maxTokens: 220 });
+    renderFollowups(node, normalizeFollowups(extractJson(out, 'array')), scope);
+  } catch { /* follow-ups are best-effort */ }
+}
+
+/* ── Document outline (UPDF mind-map style) ─────────────────────────────── */
+
+function renderOutlineTree(node, nodes) {
+  const tree = el('div', { class: 'outline-tree' });
+  for (const n of nodes) {
+    const row = el('button', { class: `outline-item lv${n.level}`, title: `Jump to page ${n.page}` }, [
+      el('span', { class: 'outline-text', text: n.text }),
+      el('span', { class: 'outline-page', text: `p.${n.page}` }),
+    ]);
+    row.onclick = () => scrollToPage(Math.max(0, n.page - 1));
+    tree.appendChild(row);
+  }
+  node.appendChild(tree);
+  const host = node.closest('.ai-msgs');
+  if (host) host.scrollTop = host.scrollHeight;
+}
+
+export async function outline() {
+  const doc = activeDoc();
+  if (!doc) return;
+  if (!aiReady()) { await configureAI(true); if (!aiReady()) return; }
+  openAIDock();
+  const ctx = await contextFor('doc');
+  if (!ctx.text.trim()) {
+    toast('No extractable text — if this is a scan, run OCR first (Edit PDF ▸ Recognise Text).', 'warn', 6000);
+    return;
+  }
+  pushMessage('user', 'Build an outline of this document', []);
+  const aiEl = pushMessage('ai', '', []);
+  state.ai.busy = true;
+  renderThinking(aiEl, true);
+  try {
+    const text = await chatComplete([
+      { role: 'system', content: 'You map document structure. Return ONLY a JSON array of nodes: {"level": 1|2|3, "text": "<section title>", "page": <1-based page where the section starts>}. Level 1 = top-level sections. Cover the whole document in reading order. No markdown, no commentary — ONLY the JSON array.' },
+      { role: 'user', content: `DOCUMENT CONTEXT\n---\n${ctx.text}\n---\n\nProduce the outline.` },
+    ], { temperature: 0.2, maxTokens: 1600 });
+    const nodes = normalizeOutline(extractJson(text, 'array'), doc.numPages);
+    if (nodes.length) renderOutlineTree(aiEl, nodes);
+    else renderAnswer(aiEl, text || '(no response)', ctx.pages);
+    const m = state.ai.messages[state.ai.messages.length - 1];
+    if (m) m.text = text;
   } catch (e) {
     renderAnswer(aiEl, `**Request failed.** ${escapeHtml(e.message)}`, []);
     toast(e.message.slice(0, 160), 'err', 6000);
@@ -830,6 +916,8 @@ export function renderAIDock() {
         el('button', { class: 'ai-chip', text: 'Translate…', onclick: () => translateDialog() }),
         el('button', { class: 'ai-chip', text: 'Proofread', onclick: () => proofread() }),
         el('button', { class: 'ai-chip', text: 'Define terms', onclick: () => ask('List the defined terms in this document with short definitions.', 'page') }),
+        el('button', { class: 'ai-chip', text: 'Contract review', title: 'AI Contract Intelligence: parties, key terms, risk flags.', onclick: () => import('./contract.js').then((m) => m.runContractReview()).catch((e) => toast('Contract review failed: ' + (e.message || e), 'err', 5000)) }),
+        el('button', { class: 'ai-chip', text: 'Outline', title: 'Clickable hierarchical outline of the document.', onclick: () => outline() }),
         el('button', {
           class: 'ai-chip' + (settings.ai.smartContext ? ' on' : ''),
           text: settings.ai.smartContext ? 'Smart context: on' : 'Smart context: off',
@@ -893,6 +981,9 @@ export function renderThinking(node, on) {
 
 export function renderAnswer(node, text, pages) {
   if (!node) return;
+  // Answers come straight from provider payloads — coerce before any string
+  // method (part-array content from some gateways must not reach .replace).
+  text = typeof text === 'string' ? text : String(text ?? '');
   node.innerHTML = miniMarkdown(stripDanglingCitation(text));
   const cites = parseCitations(text);
   if (cites.length) {

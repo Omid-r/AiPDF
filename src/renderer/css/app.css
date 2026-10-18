@@ -1261,7 +1261,9 @@ body.panning, body.panning #pages, body.panning .page { cursor: grabbing !import
 #pagesScroll.hidden ~ .rulers { display: none; }
 
 .ruler { display: none; position: absolute; background: var(--surface); }
-.rulers.on .ruler { display: block; }
+/* Strips take events when on: dragging them pulls out guides (viewer.js).
+   They frame the paper, so nothing clickable is lost underneath. */
+.rulers.on .ruler { display: block; pointer-events: auto; }
 .ruler-h { top: 0; left: var(--w-ruler-corner); right: 0; height: var(--h-ruler); }
 .ruler-v { top: var(--h-ruler); left: 0; bottom: 0; width: var(--h-ruler); }
 /* The canvas is sized in CSS; viewer.js only sets its backing store. */
@@ -2240,6 +2242,21 @@ body.chrome-hidden .ribbon { display: none; }
 .annLayer .textedit-story { pointer-events: none; }
 .annLayer .overset-badge text { dominant-baseline: auto; }
 
+/* Recognised table structure: a dashed region per table, a solid outline per
+   cell, and a corner tag. Drawn UNDER the hit targets and pointer-events:none,
+   so it never steals a click meant for a cell. */
+.table-grid { position: absolute; inset: 0; pointer-events: none; }
+.table-region { position: absolute; border: 1px dashed var(--accent-line); border-radius: 3px; }
+.table-cell { position: absolute; border: 1px solid var(--accent-line); }
+.table-tag { position: absolute; left: 0; top: -17px; padding: 0 5px; height: 15px;
+  line-height: 15px; border-radius: 3px; background: var(--accent); color: #fff;
+  font-size: 9px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.editable-text-block.in-table { border-color: var(--accent); }
+/* The cell badge inside the in-place editor. */
+.direct-editor .de-table-tag { position: absolute; right: 0; top: -17px; padding: 0 5px;
+  height: 15px; line-height: 15px; border-radius: 3px; background: var(--accent);
+  color: #fff; font-size: 9px; white-space: nowrap; pointer-events: none; }
+
 /* "This page has no editable text" — the answer to a page that looked dead. */
 .editable-empty { position: absolute; left: 50%; top: 14%; transform: translateX(-50%);
   z-index: 6; pointer-events: auto; width: min(420px, 86%);
@@ -2451,6 +2468,257 @@ body.tool-editText .textLayer span:hover {
   background: var(--surface); color: var(--text-1); cursor: pointer;
 }
 .cmp-copy:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); }
+
+/* ── AI Smart Redact (review dialog) ─────────────────────────────────── */
+.sr-cats { display: flex; flex-direction: column; gap: var(--space-1); margin: var(--space-2) 0; }
+.sr-cat {
+  display: flex; align-items: center; gap: var(--space-15);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer; user-select: none;
+}
+.sr-cat:hover { border-color: var(--border-control); background: var(--panel-3); }
+.sr-cat em { margin-left: auto; font-size: var(--text-xs); font-style: normal; color: var(--text-3); }
+.hint.warn { color: var(--warn-ink, #b45309); }
+.sr-list {
+  display: flex; flex-direction: column;
+  max-height: 320px; overflow: auto;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  margin-top: var(--space-2);
+}
+.sr-row {
+  display: flex; align-items: center; gap: var(--space-15);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs);
+}
+.sr-row:last-child { border-bottom: none; }
+.sr-chip {
+  flex: none; padding: 0 var(--space-1);
+  border-radius: var(--radius-pill);
+  color: #fff; font-size: 10px; font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+.sr-page { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sr-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.sr-why {
+  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-3); font-style: italic;
+}
+.sr-count { color: var(--text-3); font-size: var(--text-xs); white-space: nowrap; }
+
+/* ── AI suggested follow-ups ─────────────────────────────────────────── */
+.ai-followups { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+
+/* ── Document outline (UPDF mind-map style) ──────────────────────────── */
+.outline-tree {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  max-height: 300px; overflow: auto;
+}
+.outline-item {
+  --ctl-h: auto;
+  display: flex; align-items: baseline; gap: var(--space-15);
+  width: 100%; text-align: left;
+  background: none; border: none; border-radius: var(--radius-xs);
+  padding: 3px var(--space-1);
+  font-size: var(--text-xs); color: var(--text-1);
+  cursor: pointer;
+}
+.outline-item:hover { background: var(--panel-3); }
+.outline-item.lv1 { font-weight: var(--weight-semibold); }
+.outline-item.lv2 { padding-left: var(--space-4); }
+.outline-item.lv3 { padding-left: var(--space-6); color: var(--text-2); }
+.outline-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-page { flex: none; margin-left: auto; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+/* ── AI Contract Intelligence card ───────────────────────────────────── */
+.ci-card {
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  margin-top: var(--space-2);
+  display: flex; flex-direction: column; gap: var(--space-2);
+  background: var(--surface);
+}
+.ci-top { display: flex; align-items: center; gap: var(--space-15); flex-wrap: wrap; }
+.ci-type {
+  font-weight: var(--weight-semibold); color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-radius: var(--radius-pill);
+  padding: 1px var(--space-15);
+  font-size: var(--text-xs);
+}
+.ci-verdict { font-size: var(--text-xs); color: var(--text-3); }
+.ci-verdict.ok { color: var(--ok-ink, #15803d); font-weight: var(--weight-semibold); }
+.ci-summary { font-size: var(--text-xs); color: var(--text-2); }
+.ci-h {
+  font-size: 10px; font-weight: var(--weight-semibold);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-3);
+}
+.ci-parties { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.ci-party {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 0 var(--space-15);
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.ci-terms { display: flex; flex-direction: column; }
+.ci-term {
+  display: flex; align-items: baseline; gap: var(--space-15);
+  padding: 2px 0; border-bottom: 1px dashed var(--border);
+  font-size: var(--text-xs);
+}
+.ci-term:last-child { border-bottom: none; }
+.ci-label { flex: none; width: 38%; color: var(--text-3); }
+.ci-value { flex: 1; color: var(--text-1); min-width: 0; }
+.ci-risk { display: flex; align-items: flex-start; gap: var(--space-15); }
+.ci-sev {
+  flex: none; margin-top: 1px;
+  border-radius: var(--radius-xs);
+  padding: 0 var(--space-1);
+  font-size: 9px; font-weight: var(--weight-bold);
+  color: #fff;
+}
+.ci-sev.high { background: #b91c1c; }
+.ci-sev.medium { background: #b45309; }
+.ci-sev.low { background: #52525b; }
+.ci-risk-body { flex: 1; min-width: 0; }
+.ci-risk-title { font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--text-1); }
+.ci-risk-detail { font-size: var(--text-xs); color: var(--text-2); }
+.ci-actions { margin: 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--text-2); }
+.ci-actions li { margin-bottom: 2px; }
+
+/* ── Read-aloud player bar ───────────────────────────────────────────── */
+.tts-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-control);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.18);
+  max-width: min(92vw, 640px);
+  animation: tts-in 0.22s ease-out;
+}
+@keyframes tts-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.tts-icon { display: inline-flex; color: var(--accent-ink); margin: 0 2px; }
+.tts-info {
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 190px;
+  margin-right: var(--space-1);
+}
+.tts-btn {
+  --ctl-h: 30px;
+  --ctl-r: var(--radius-pill);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-pill);
+  background: var(--tool);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+}
+.tts-btn:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-softer); }
+.tts-btn:active { transform: scale(0.94); }
+.tts-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.tts-btn.primary:hover { filter: brightness(1.06); }
+.tts-btn.ghost { border-color: transparent; background: transparent; }
+.tts-speed {
+  height: 26px;
+  font-size: var(--text-xs);
+  border-radius: var(--radius-pill);
+  border-color: var(--border-control);
+  padding: 0 var(--space-1);
+}
+.tts-page {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: center;
+}
+.tts-status {
+  font-size: var(--text-xs);
+  color: var(--text-3);
+  min-width: 84px;
+  max-width: 110px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tts-status.spin::after {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-left: 6px;
+  border: 2px solid var(--border-control);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tts-spin 0.8s linear infinite;
+  vertical-align: -1px;
+}
+@keyframes tts-spin { to { transform: rotate(360deg); } }
+
+/* ── Ruler guides (Photoshop-style) ──────────────────────────────────── */
+.page-guides { position: absolute; inset: 0; pointer-events: none; z-index: 30; }
+.guide {
+  position: absolute;
+  pointer-events: auto;
+  background: transparent;
+}
+.guide-h {
+  left: 0; right: 0; height: 9px; margin-top: -4.5px;
+  cursor: row-resize;
+}
+.guide-v {
+  top: 0; bottom: 0; width: 9px; margin-left: -4.5px;
+  cursor: col-resize;
+}
+.guide-h::after {
+  content: ''; display: block; margin-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 85%, transparent);
+}
+.guide-v::after {
+  content: ''; display: block; margin-left: 4px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 85%, transparent);
+}
+.guide:hover::after { border-color: var(--accent); }
+.guide-drag { pointer-events: none; }
+.guide-drag::after { border-color: var(--accent); }
+.guide-drag.guide-kill::after { border-color: #d43c3c; border-top-style: dashed; border-left-style: dashed; }
+.rulers.on .ruler-h { cursor: row-resize; }
+.rulers.on .ruler-v { cursor: col-resize; }
 
 /* ── Motion preference ─────────────────────────────────────────────────────
    All keyframe animations are disabled, and transitions collapse, when the

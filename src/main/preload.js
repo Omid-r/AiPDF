@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('ai:stream', listener);
     return () => ipcRenderer.removeListener('ai:stream', listener);
   },
+  // TTS (Read Aloud) providers — same proxy rules as ai:chat, but binary-safe.
+  ttsRequest: (opts) => ipcRenderer.invoke('tts:request', opts),
 
   on: (channel, handler) => {
     const allowed = [

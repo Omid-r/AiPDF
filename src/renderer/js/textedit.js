@@ -4,14 +4,15 @@ import {
 } from './viewer.js';
 import { el, rgbToCss, hexToRgb, rgbToHex, clamp, toast, uid } from './util.js';
 import { renderPageAnnotations } from './annots.js';
-import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, textEditDrawBox } from './textblocks.js';
+import { groupTextBlocks, editForBlock, blockText, wrapBlockText, blocksFromOcrLines, flatOcrLines, ocrSplitSegments, ocrCellBlock, textEditDrawBox, textItemBoxes } from './textblocks.js';
 import { rectUnion } from './textops.js';
+import { detectTables, tablesFromSegmentItems, tableForBlock, tableLabel } from './tables.js';
 import {
   SCHEMA_VERSION, mergeStories, threadStory, storyFromEdit, layoutStory, fitCount, makeFrame, normRect,
 } from './story.js';
 import { isUserFont, listSystemFonts } from './fonts.js';
 import { resolveFontFor } from './fontresolve.js';
-import { confirmDialog } from './dialog.js';
+import { confirmDialog, showModal } from './dialog.js';
 
 let activeEditor = null;
 
@@ -90,7 +91,17 @@ export async function editableSource(pageIndex) {
   try {
     const tc = await getTextContent(pageIndex);
     const native = groupTextBlocks(tc, width).filter((b) => (b.text || '').trim().length > 0);
-    if (native.length) return { blocks: native, source: 'native' };
+    if (native.length) {
+      /* Tables are recognised HERE, before anything consumes the block list, so
+       * that every consumer — the hit targets, the Direct Editor, replace-all,
+       * the agent — agrees on what an editable unit is: one block per CELL. */
+      const pageH = doc.pageSizes?.[pageIndex]?.h || 842;
+      const paths = await pageRules(doc, pageIndex);
+      const found = detectTables(native, { page: pageIndex, pageW: width, pageH, ...(paths ? { paths } : {}) });
+      const split = splitBlocksByCells(tc, native, found, width);
+      tablesByBlocks.set(split.blocks, split.tables);
+      return { blocks: split.blocks, source: 'native' };
+    }
   } catch { /* fall through to OCR — an unreadable page is not an empty one */ }
 
   const rec = doc.ocr?.[pageIndex];
@@ -98,14 +109,314 @@ export async function editableSource(pageIndex) {
     const height = doc.pageSizes?.[pageIndex]?.h || 842;
     const ocr = blocksFromOcrLines(rec.lines, width, height, rec.dpi || 200, pageIndex)
       .filter((b) => (b.text || '').trim().length > 0);
-    if (ocr.length) return { blocks: ocr, source: 'ocr' };
+    if (ocr.length) {
+      /* Tables live on scans too — the tender-sheet case: one OCR "line"
+       * reads straight across several cells, so paragraph grouping fuses the
+       * whole table into a handful of row blocks. Detect the grid from OCR
+       * column segments and rebuild ONE block per cell, exactly like the
+       * native-text path does. */
+      const split = splitOcrBlocksByCells(rec, ocr, width, height, pageIndex);
+      tablesByBlocks.set(split.blocks, split.tables);
+      return { blocks: split.blocks, source: 'ocr' };
+    }
     return { blocks: [], source: 'ocr-empty' };
   }
   return { blocks: [], source: 'none' };
 }
 
+/**
+ * One editable block per CELL for recognised (scanned) pages.
+ *
+ * Scans have no vector rules, so the grid comes from the OCR text itself:
+ * lines are cut into column-candidate segments at word gutters
+ * (textblocks.ocrSplitSegments), the recurring gutters across rows give the
+ * grid (tables.tablesFromSegmentItems), and each cell's segments rebuild an
+ * independent block whose lineIds stay the ORIGINAL OCR line ids — the
+ * editor's identity/wash machinery depends on them. Blocks with no segment
+ * inside any table pass through untouched; a block whose text all lands in
+ * table cells is replaced by its per-cell pieces.
+ */
+function splitOcrBlocksByCells(rec, blocks, pageWidth, pageHeight, pageIndex) {
+  const dpi = rec.dpi || 200;
+  const flat = flatOcrLines(rec.lines, pageHeight, dpi);       // li = index into rec.lines
+  if (!flat.length) return { blocks, tables: [] };
+  const flatByLi = new Map(flat.map((l) => [l.li, l]));
+  const segments = ocrSplitSegments(flat);
+  const tables = tablesFromSegmentItems(segments, { page: pageIndex });
+  if (!tables.length) return { blocks, tables };
+
+  const inCell = (rect, cell) => {
+    const cx = (rect[0] + rect[2]) / 2, cy = (rect[1] + rect[3]) / 2;
+    return cx >= cell.rect[0] && cx <= cell.rect[2] && cy >= cell.rect[1] && cy <= cell.rect[3];
+  };
+  const cellKey = (t, c) => `${t.id}|${c.row}|${c.col}`;
+
+  /* Pass 1 — per table, attribute every fully-inside block's line segments to
+   * cells. Segments pool ACROSS blocks: page-level grouping may have split one
+   * cell's lines into several blocks, and the cell is the editable unit. */
+  const segsByCell = new Map();      // cellKey → { table, cell, segs: [] }
+  const consumed = new Set();
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const block = blocks[bi];
+    const lineIds = block.lineIds || [];
+    const table = tables.find((t) => {
+      const [x0, y0, x1, y1] = t.bbox;
+      const r = block.coverRect;
+      const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+      return cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+    });
+    if (!table || !lineIds.length) continue;
+
+    const ownSegs = segments.filter((s) => lineIds.includes(s.li));
+    if (!ownSegs.length) continue;
+    let mapped = 0;
+    for (const seg of ownSegs) {
+      const cell = table.cells.find((c) => inCell(seg.rect, c));
+      if (!cell) continue;
+      mapped++;
+      const k = cellKey(table, cell);
+      if (!segsByCell.has(k)) segsByCell.set(k, { table, cell, segs: [] });
+      segsByCell.get(k).segs.push(seg);
+    }
+    // Nothing attributable, or the block carries text OUTSIDE the table too
+    // (splitting would orphan the outside part): keep it whole.
+    if (!mapped || mapped < ownSegs.length) continue;
+    consumed.add(bi);
+  }
+
+  /* Pass 2 — wrapped cells: the text-cluster grid has one ROW per OCR line
+   * band, so a 3-line cell lands in 3 stacked cells. Coalesce consecutive
+   * bands in the same column when they sit at wrapped-line pitch (gap well
+   * under half the band height) — the user's cell, not the detector's line
+   * band, is the editable unit. Real row separations carry more space (or a
+   * rule) and stay apart. */
+  const groups = [];
+  for (const [k, rec] of segsByCell) {
+    groups.push({ k, ...rec, merged: [rec] });
+  }
+  const absorb = new Set();
+  for (const [table, list] of [...new Set([...segsByCell.values()].map((r) => r.table))].map((t) => [t, [...segsByCell.values()].filter((r) => r.table === t)])) {
+    const byCol = new Map();
+    for (const rec of list) {
+      if (!byCol.has(rec.cell.col)) byCol.set(rec.cell.col, []);
+      byCol.get(rec.cell.col).push(rec);
+    }
+    for (const col of [...byCol.keys()].sort((a, b) => a - b)) {
+      const colRecs = byCol.get(col).sort((a, b) => b.cell.row - a.cell.row); // top first (rows are y-ascending bands)
+      for (let i = 0; i < colRecs.length; i++) {
+        const chain = [colRecs[i]];
+        for (let j = i + 1; j < colRecs.length; j++) {
+          const above = chain[chain.length - 1];
+          const below = colRecs[j];
+          // tableFromRun rows are y-ordered top-first, so the band below on
+          // the page is row + 1.
+          if (below.cell.row !== above.cell.row + 1) break;   // only the immediate next band
+          const gap = above.cell.rect[1] - below.cell.rect[3]; // above.bottom − below.top
+          const hMin = Math.min(above.cell.rect[3] - above.cell.rect[1], below.cell.rect[3] - below.cell.rect[1]);
+          if (gap > hMin * 0.5) break;                        // real row separation
+          chain.push(below);
+        }
+        if (chain.length > 1) {
+          const idx = groups.findIndex((g) => g.k === cellKey(table, chain[0].cell));
+          const head = groups[idx];
+          head.cell = {
+            ...head.cell,
+            row: Math.min(...chain.map((c) => c.cell.row)),
+            rect: [
+              Math.min(...chain.map((c) => c.cell.rect[0])),
+              Math.min(...chain.map((c) => c.cell.rect[1])),
+              Math.max(...chain.map((c) => c.cell.rect[2])),
+              Math.max(...chain.map((c) => c.cell.rect[3])),
+            ],
+          };
+          for (const c of chain.slice(1)) { head.segs.push(...c.segs); absorb.add(cellKey(table, c.cell)); }
+        }
+      }
+    }
+  }
+
+  const entries = [];
+  for (let bi = 0; bi < blocks.length; bi++) {
+    if (!consumed.has(bi)) entries.push({ block: blocks[bi], from: bi });
+  }
+  for (const rec of groups) {
+    if (absorb.has(rec.k)) continue;
+    const piece = ocrCellBlock(rec.segs, flatByLi, rec.cell.rect, pageWidth, pageIndex);
+    if (piece && String(piece.text || '').trim()) entries.push({ block: piece, cell: rec.cell, table: rec.table });
+  }
+
+  const out = [];
+  const piecesByCell = new Map();
+  for (const e of entries) {
+    const at = out.length;
+    out.push(e.block);
+    if (e.cell) {
+      const k = cellKey(e.table, e.cell);
+      if (!piecesByCell.has(k)) piecesByCell.set(k, []);
+      piecesByCell.get(k).push(at);
+    }
+  }
+  for (const t of tables) {
+    for (const cell of t.cells) {
+      cell.blocks = piecesByCell.get(cellKey(t, cell)) || [];
+    }
+  }
+  return { blocks: out, tables };
+}
+
 export async function editableBlocks(pageIndex) {
   return (await editableSource(pageIndex)).blocks;
+}
+
+/** Table structure for a page. Detection is geometry-only and cheap; the block
+ *  array is rebuilt on every repaint, so a reference cache would never hit.
+ *
+ *  The pairing matters: `splitBlocksByCells` decides which blocks belong to
+ *  which cell, so the tables returned here must be the ones it patched — a
+ *  fresh detection would report cell.blocks indices into the ORIGINAL array,
+ *  which no longer line up with the split one. The WeakMap keeps the pairing
+ *  exact without a cache that could go stale. */
+const tablesByBlocks = new WeakMap();
+function pageTables(pageIndex, blocks) {
+  const known = tablesByBlocks.get(blocks);
+  if (known) return known;
+  return detectTables(blocks, tableDetectOptions(pageIndex));
+}
+
+/** Rules are read from the ORIGINAL bytes, which never change for an open
+ *  document (every export rebuilds from them), so the extraction is cached per
+ *  document rather than per repaint. */
+const ruleCache = new WeakMap();
+async function pageRules(doc, pageIndex) {
+  if (!doc) return null;
+  let byPage = ruleCache.get(doc);
+  if (!byPage) { byPage = new Map(); ruleCache.set(doc, byPage); }
+  if (byPage.has(pageIndex)) return byPage.get(pageIndex);
+  let paths = null;
+  try {
+    const { pageRulePaths } = await import('./pdfwrite.js');
+    paths = await pageRulePaths(doc, pageIndex);
+  } catch { paths = null; }
+  byPage.set(pageIndex, paths);
+  return paths;
+}
+
+function tableDetectOptions(pageIndex, paths = null) {
+  const doc = activeDoc();
+  const pageW = doc?.pageSizes?.[pageIndex]?.w || 595;
+  const pageH = doc?.pageSizes?.[pageIndex]?.h || 842;
+  return { page: pageIndex, pageW, pageH, ...(paths ? { paths } : {}) };
+}
+
+/**
+ * Rebuild the blocks inside a table so there is ONE block per CELL.
+ *
+ * Two ways a producer can bury the cell structure, and both are handled:
+ *  - a whole row emitted as one text run (one block spanning every column);
+ *  - each cell line emitted separately (page-level grouping keeps stacked
+ *    cell lines apart, because the row's first line sets the indent baseline).
+ * The grid is authoritative either way: every item of every block that sits
+ * inside a table is attributed to the cell containing its centre, and each
+ * cell's union of items is regrouped ONCE (`groupTextBlocks` with an item
+ * subset, which keeps the page-level item indices so excision and keys stay
+ * correct). A cell therefore ends up with exactly one editable block no
+ * matter how its text arrived.
+ *
+ * A block only participates when ALL of its items land in the table — one
+ * that straddles the table edge stays whole, or its outside text would be
+ * orphaned. Cells that end up with no text are left empty rather than
+ * inheriting a neighbour's run — an empty cell is a place to type, not a
+ * duplicate.
+ */
+function splitBlocksByCells(tc, blocks, tables, pageWidth) {
+  if (!tables.length || !tc?.items?.length) return { blocks, tables };
+
+  const boxByIndex = new Map(textItemBoxes(tc).map((b) => [b.index, b]));
+  const contains = (r, cell) => {
+    const cx = (r[0] + r[2]) / 2, cy = (r[1] + r[3]) / 2;
+    return cx >= cell[0] && cx <= cell[2] && cy >= cell[1] && cy <= cell[3];
+  };
+  const cellKey = (t, c) => `${t.id}|${c.row}|${c.col}`;
+
+  /* Pass 1 — per table, attribute every fully-inside block's items to cells. */
+  const itemsByCell = new Map();     // cellKey → Set of tc item indices
+  const consumed = new Set();        // block indices replaced by per-cell pieces
+  for (let bi = 0; bi < blocks.length; bi++) {
+    const block = blocks[bi];
+    const box = block.coverRect;
+    const table = tables.find((t) => contains(box, t.bbox));
+    if (!table || !block.itemIndices?.length) continue;
+
+    const perCell = new Map();
+    let mapped = 0;
+    for (const idx of block.itemIndices) {
+      const b = boxByIndex.get(idx);
+      if (!b) continue;
+      const cell = table.cells.find((c) => contains(b.rect, c.rect));
+      if (!cell) continue;
+      mapped++;
+      const k = cellKey(table, cell);
+      if (!itemsByCell.has(k)) itemsByCell.set(k, { table, cell, idxs: new Set() });
+      itemsByCell.get(k).idxs.add(idx);
+    }
+    // Nothing attributable (text on a rule line, rotated, …): keep the block
+    // whole rather than dropping its text from the editable set.
+    if (!mapped) continue;
+    // Straddler: some items have no cell here — keep the block whole so its
+    // outside text is not orphaned.
+    if (mapped < block.itemIndices.length) continue;
+    consumed.add(bi);
+  }
+
+  /* Pass 2 — one regrouped block per cell, then the survivors. */
+  const entries = [];
+  const cellPieceIndex = new Map();
+  for (let bi = 0; bi < blocks.length; bi++) {
+    if (!consumed.has(bi)) { entries.push({ block: blocks[bi], from: bi }); continue; }
+  }
+  for (const { table, cell, idxs } of itemsByCell.values()) {
+    for (const piece of groupTextBlocks(tc, pageWidth, idxs)) {
+      if (!String(piece.text || '').trim()) continue;
+      /* Ownership stops at the cell boundary. A cell's text can overflow its
+       * column by a point or two, and the block rect follows the glyphs — so
+       * an unclamped rect reaches into the neighbouring cell and the writer
+       * then excises that neighbour's text too ("I edited one cell and lost
+       * the one next to it"). The CELL is authoritative about what belongs to
+       * it. `coverRect` is left alone so the wash still covers the overflow. */
+      const own = [
+        Math.max(piece.coverRect[0], cell.rect[0]),
+        Math.max(piece.coverRect[1], cell.rect[1]),
+        Math.min(piece.coverRect[2], cell.rect[2]),
+        Math.min(piece.coverRect[3], cell.rect[3]),
+      ];
+      piece.ownRect = (own[2] - own[0] > 0.5 && own[3] - own[1] > 0.5) ? own : piece.coverRect.slice();
+      entries.push({ block: piece, cell, table });
+    }
+  }
+
+  /* Pass 2 — flatten, recording final indices so cell.blocks can be rebuilt. */
+  const out = [];
+  const origToFinal = new Map();
+  const piecesByCell = new Map();
+  for (const e of entries) {
+    const at = out.length;
+    out.push(e.block);
+    if (e.from != null) origToFinal.set(e.from, at);
+    if (e.cell) {
+      const k = cellKey(e.table, e.cell);
+      if (!piecesByCell.has(k)) piecesByCell.set(k, []);
+      piecesByCell.get(k).push(at);
+    }
+  }
+
+  for (const t of tables) {
+    for (const cell of t.cells) {
+      const kept = (cell.blocks || []).map((bi) => origToFinal.get(bi)).filter((x) => x != null);
+      const split = piecesByCell.get(cellKey(t, cell)) || [];
+      cell.blocks = [...split, ...kept].sort((a, b) => a - b);
+    }
+  }
+  return { blocks: out, tables };
 }
 
 /**
@@ -144,17 +455,44 @@ export async function recognizePageForEditing(pageIndex, opts = {}) {
  * Requiring it made the Direct Editor silently dead whenever the text layer had
  * not been built — which happens whenever the scale drifts between the page's
  * render and its text-layer build. */
+
+/** Per-page repaint generation, so an older in-flight repaint cannot append a
+ *  second hit-target layer over a newer one. */
+const renderGen = new Map();
+
 export async function renderEditableBlocks(pageIndex = null) {
   const records = pageIndex == null ? Array.from(document.querySelectorAll('#pages .page')).map((p) => Number(p.dataset.i)) : [pageIndex];
   for (const i of records) {
+    /* Repaints overlap: editableSource() awaits the text content (and the page's
+     * ruling lines), so two repaints can be in flight for one page. Without a
+     * generation stamp the later one appends a SECOND hit-target layer on top of
+     * the first — duplicate buttons, and every click lands on the stale copy.
+     * Stamp the run and let only the newest one draw. */
+    const gen = (renderGen.get(i) || 0) + 1;
+    renderGen.set(i, gen);
     const rec = pageEl(i);
     if (!rec) continue;
-    rec.wrap.querySelector('.editable-text-layer')?.remove();
+    rec.wrap.querySelectorAll('.editable-text-layer').forEach((n) => n.remove());
     if (state.tool !== 'editText' || !rec.rendered) continue;
     const doc = activeDoc();
     const { blocks, source } = await editableSource(i);
+    if (renderGen.get(i) !== gen) continue;              // superseded
     if (!doc || doc !== activeDoc() || state.tool !== 'editText' || !rec.wrap.isConnected) continue;
     const layer = el('div', { class: 'editable-text-layer' });
+    // Recognise tables once per repaint: the grid is drawn under the hit
+    // targets, and each block inside a cell carries its row/column so a click
+    // opens a CELL-scoped edit rather than the whole line.
+    const tables = blocks.length ? pageTables(i, blocks) : [];
+    const cellByBlock = new Map();
+    for (const t of tables) {
+      for (const row of t.rows) {
+        for (const cell of row.cells) {
+          for (const bi of cell.blocks) cellByBlock.set(bi, { table: t, cell });
+        }
+      }
+    }
+    const grid = tableGridLayer(i, tables);
+    if (grid) layer.appendChild(grid);
     if (!blocks.length) {
       // Silence is what made this tool look broken: with no block to click the
       // page simply appeared dead. Say why, and offer the way out.
@@ -190,7 +528,8 @@ export async function renderEditableBlocks(pageIndex = null) {
       const block = blocks[n];
       const prior = editForBlock(doc, i, block);
       if (overlapsBox(block.coverRect) || (prior && prior.boxId && doc.annots.some((a) => a.id === prior.boxId))) continue;
-      const r = block.coverRect;
+      const inCell = cellByBlock.get(n);
+      const r = inCell ? inCell.cell.rect : block.coverRect;
       const a = toCss(i, r[0], r[3]);
       const b = toCss(i, r[2], r[1]);
       const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
@@ -204,6 +543,13 @@ export async function renderEditableBlocks(pageIndex = null) {
       // visually similar runs can be told apart before a merge is confirmed —
       // the research is emphatic that a merge must be an explicit decision.
       hit.appendChild(el('span', { class: 'block-order', text: String(n + 1), 'aria-hidden': 'true' }));
+      if (inCell) {
+        hit.dataset.table = inCell.table.id;
+        hit.dataset.row = String(inCell.cell.row);
+        hit.dataset.col = String(inCell.cell.col);
+        hit.classList.add('in-table');
+        hit.title += ` · ${tableLabel(inCell.table, inCell.cell, tables.indexOf(inCell.table))}`;
+      }
       if (source === 'ocr') hit.classList.add('from-ocr');
       layer.appendChild(hit);
     }
@@ -225,6 +571,39 @@ function emptyNotice(pageIndex, source) {
   box.appendChild(row);
   box.addEventListener('pointerdown', (e) => e.stopPropagation());
   return box;
+}
+
+/** Draw the recognised table structure under the hit targets: a dashed region
+ *  per table, a solid outline per cell, and a small "Table 1 · 3×4" tag. The
+ *  layer is pointer-events:none so it never eats a click meant for a cell. */
+function tableGridLayer(pageIndex, tables) {
+  if (!tables.length) return null;
+  const layer = el('div', { class: 'table-grid', 'aria-hidden': 'true' });
+  for (let ti = 0; ti < tables.length; ti++) {
+    const t = tables[ti];
+    const a = toCss(pageIndex, t.bbox[0], t.bbox[3]);
+    const b = toCss(pageIndex, t.bbox[2], t.bbox[1]);
+    const left = Math.min(a.x, b.x);
+    const top = Math.min(a.y, b.y);
+    const w = Math.abs(b.x - a.x);
+    const h = Math.abs(b.y - a.y);
+    const region = el('div', { class: 'table-region', style: {
+      left: left + 'px', top: top + 'px', width: w + 'px', height: h + 'px' } });
+    region.appendChild(el('div', { class: 'table-tag', text: `Table ${ti + 1} · ${t.rows.length}×${t.cols.length}` }));
+    for (const row of t.rows) {
+      for (const cell of row.cells) {
+        const ca = toCss(pageIndex, cell.rect[0], cell.rect[3]);
+        const cb = toCss(pageIndex, cell.rect[2], cell.rect[1]);
+        region.appendChild(el('div', { class: 'table-cell', style: {
+          left: (Math.min(ca.x, cb.x) - left) + 'px',
+          top: (Math.min(ca.y, cb.y) - top) + 'px',
+          width: Math.abs(cb.x - ca.x) + 'px',
+          height: Math.abs(cb.y - ca.y) + 'px' } }));
+      }
+    }
+    layer.appendChild(region);
+  }
+  return layer;
 }
 
 /** The fields a Direct Editor commit can change. Anything listed here makes an
@@ -273,7 +652,9 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
     },
     sourceRects: (options.sourceRects && options.sourceRects.length
       ? options.sourceRects
-      : [(existing?.coverRect || block.coverRect).slice()]).map(normRect).filter(Boolean),
+      // `ownRect` is a table cell's clamped ownership box: the block rect minus
+      // anything that spilled past the cell boundary.
+      : [(existing?.ownRect || existing?.coverRect || block.ownRect || block.coverRect).slice()]).map(normRect).filter(Boolean),
     // Ordered destination frames. One frame is the ordinary in-place edit; two
     // or more is a threaded story that continues across pages.
     frames: (options.frames && options.frames.length ? options.frames.map((f) => makeFrame(f.page ?? pageIndex, f.rect || f))
@@ -281,6 +662,10 @@ export async function commitBlockEdit(pageIndex, block, nextText, options = {}) 
     // What will draw the text and what it cannot draw — recorded so the report
     // describes the file, not the request.
     fontPolicy: options.fontPolicy || existing?.fontPolicy || null,
+    // The recognised table cell this story belongs to, when authored inside one.
+    // The frame carries the geometry that constrains the text; this records the
+    // structure (table/row/column) for the panel and for re-opening the cell.
+    table: options.table || existing?.table || null,
     // Cover model: the cover stays over the ORIGINAL footprint forever, while
     // the replacement text box travels with the user. On re-edit, keep the
     // moved geometry — resetting to the block would teleport a dragged block
@@ -615,6 +1000,58 @@ function describeMissing(missing) {
  * opts.clientX/clientY put the caret where the user clicked, so clicking the
  * middle of a word lands the caret in the middle of that word.
  */
+/**
+ * Ask what the text should say, before any editing starts.
+ *
+ * The editor used to open with the caret sitting inside the text the detector
+ * had guessed at, so the very first keystroke silently threw that guess away —
+ * and with a table cell, "that guess" is a whole cell's contents. When the text
+ * IS detected there is something concrete to confirm, so show it, let the user
+ * correct it or accept it, and only then open the editor. A block whose text
+ * cannot be detected has nothing to confirm and goes straight to the editor.
+ *
+ * Resolves to the confirmed string, or `null` if the user cancelled — a
+ * cancelled ask must leave the document completely untouched, not open an
+ * editor the user has already backed out of.
+ */
+function askEditText({ text, where, multiline }) {
+  let value = text;
+  return showModal({
+    title: 'Edit text',
+    width: 'narrow',
+    body: (b) => {
+      b.appendChild(el('div', { class: 'hint', text: where, style: { marginBottom: '8px' } }));
+      const ta = el('textarea', {
+        class: 'de-ask-text', rows: multiline ? 4 : 1, spellcheck: 'false',
+        style: { width: '100%', resize: 'vertical', font: 'inherit', lineHeight: '1.45' },
+      });
+      ta.value = text;
+      ta.addEventListener('input', () => { value = ta.value; });
+      // Enter means "apply" for a single line. For multi-line text Enter has to
+      // stay a newline, exactly as it does in the editor itself, so applying
+      // there is Ctrl+Enter (handled by the modal).
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !multiline) {
+          e.preventDefault();
+          e.stopPropagation();
+          b.closest('.modal')?.querySelector('button.primary')?.click();
+        }
+      });
+      b.appendChild(ta);
+      b.appendChild(el('div', {
+        class: 'hint',
+        text: multiline ? 'Enter starts a new line · Ctrl+Enter applies' : 'Enter applies · Esc cancels',
+        style: { marginTop: '6px' },
+      }));
+      setTimeout(() => { ta.focus(); ta.select(); }, 30);
+    },
+    buttons: [
+      { label: 'Cancel', value: null, kind: 'ghost' },
+      { label: 'Edit', value: true, kind: 'primary', default: true },
+    ],
+  }).then((ok) => (ok ? value : null));
+}
+
 export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   closeActive();
   const doc = activeDoc(), rec = pageEl(pageIndex);
@@ -623,21 +1060,45 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   const block = blocks[blockIndex];
   if (!block || doc !== activeDoc()) return null;
 
+  // A block inside a recognised table is edited as a CELL: the editor and the
+  // written frame use the cell rect, so text wraps inside the cell and the
+  // overset model reports a too-small cell instead of spilling into the next.
+  const tables = pageTables(pageIndex, blocks);
+  const cellHit = tableForBlock(tables, blockIndex);
+  const cell = cellHit?.cell || null;
+
   const existing = editForBlock(doc, pageIndex, block);
+
+  /* Confirm the text before editing it. Only for a block that is still the
+   * ORIGINAL source: once an edit exists its text was authored by the user, so
+   * asking again would be asking them to confirm their own typing. */
+  const detected = blockText(doc, pageIndex, block);
+  let seeded = detected;
+  if (!existing && String(detected).trim() && opts.askText !== false) {
+    const where = cell
+      ? `Detected text on page ${pageIndex + 1}, ${tableLabel(cellHit.table, cell, tables.indexOf(cellHit.table))}. Change it, or apply it as it is.`
+      : `Detected text on page ${pageIndex + 1}. Change it, or apply it as it is.`;
+    const asked = await askEditText({ text: detected, where, multiline: String(detected).includes('\n') });
+    if (asked == null) return null;                 // cancelled — touch nothing
+    if (doc !== activeDoc()) return null;           // document swapped under us
+    seeded = asked;
+  }
+
   const s = currentScale();
   // A block the user dragged away edits where it NOW is, not where its
   // original text was — otherwise committing would teleport it back.
   const movedBox = existing?.baseline && block.baseline
     && (existing.baseline[0] !== block.baseline[0] || existing.baseline[1] !== block.baseline[1])
     ? textEditDrawBox(existing) : null;
-  const r = movedBox || block.coverRect;
+  const r = cell ? cell.rect : (movedBox || block.coverRect);
   const a = toCss(pageIndex, r[0], r[3]);
   const b = toCss(pageIndex, r[2], r[1]);
   const left = Math.min(a.x, b.x), top = Math.min(a.y, b.y);
 
-  // Mutable box, in points — the handles below edit these.
-  let width = existing?.maxWidth || block.maxWidth;
-  let height = existing?.maxHeight || block.maxHeight;
+  // Mutable box, in points — the handles below edit these. In a table the box
+  // starts as the cell, so the editor's footprint and the written frame agree.
+  let width = cell ? (cell.rect[2] - cell.rect[0]) : (existing?.maxWidth || block.maxWidth);
+  let height = cell ? (cell.rect[3] - cell.rect[1]) : (existing?.maxHeight || block.maxHeight);
   const size = existing?.size || block.size;
   const family = existing?.fontFamily || block.fontFamily;
   const color = existing?.color || block.color;
@@ -649,7 +1110,10 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
   pendingFormat = null;
   const spacing = (existing?.lineHeight || block.lineHeight) / size;
   const overlay = el('div', { class: 'direct-editor',
-    dataset: { size: String(size), lineSpacing: String(+spacing.toFixed(3)) },
+    dataset: {
+      size: String(size), lineSpacing: String(+spacing.toFixed(3)),
+      ...(cell ? { table: cellHit.table.id, row: String(cell.row), col: String(cell.col) } : {}),
+    },
     style: { left: left + 'px', top: top + 'px',
       width: Math.max(24, width * s) + 'px', minHeight: Math.max(16, height * s) + 'px' } });
   const surface = el('div', { class: 'direct-editor-surface', contenteditable: 'plaintext-only',
@@ -658,8 +1122,12 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
       lineHeight: (lineHeight * s) + 'px', color: rgbToCss(color, 1),
       textAlign: align, letterSpacing: (charSpacing * s) + 'px' } });
   if (hScale !== 100) surface.style.transform = `scaleX(${hScale / 100})`;
-  surface.textContent = blockText(doc, pageIndex, block);
+  surface.textContent = seeded;
   overlay.appendChild(surface);
+  if (cell) {
+    overlay.appendChild(el('div', { class: 'de-table-tag',
+      text: tableLabel(cellHit.table, cell, tables.indexOf(cellHit.table)) }));
+  }
 
   for (const corner of ['nw', 'ne', 'sw', 'se']) {
     overlay.appendChild(el('div', { class: `de-handle ${corner}`, dataset: { corner }, title: 'Drag to resize the block' }));
@@ -775,6 +1243,16 @@ export async function openDirectEditor(pageIndex, blockIndex, opts = {}) {
       size: finalSize, color: fmt.color || color, maxWidth, maxHeight, fontFamily: finalFamily,
       align: fmt.align, bold: fmt.bold, italic: fmt.italic, underline: fmt.underline,
       lineHeight: leading, charSpacing: fmt.charSpacing, hScale: fmt.hScale,
+      // A cell is a one-frame flow story: the frame IS the cell, so the writer
+      // wraps inside it and reports overset when the text cannot fit.
+      ...(cell ? {
+        mode: 'flow',
+        frames: [{ page: pageIndex, rect: cell.rect }],
+        table: {
+          id: cellHit.table.id, row: cell.row, col: cell.col,
+          rows: cellHit.table.rows.length, cols: cellHit.table.cols.length,
+        },
+      } : {}),
     });
     closeActive();
   };

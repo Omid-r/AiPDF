@@ -925,6 +925,7 @@ function scheduleRulers(paint) {
   if (rulerFrame) return;
   rulerFrame = requestAnimationFrame(() => {
     rulerFrame = 0;
+    if (guidesDirty) renderGuides();
     const mustPaint = rulerPaint;
     rulerPaint = false;
     if (mustPaint) { refreshRulers(); return; }
@@ -960,6 +961,12 @@ export function initRulers() {
     RD.toggle.innerHTML = svgIcon('measure', 13, 1.8);
     RD.toggle.onclick = () => toggleRulers();
   }
+  // Guide drags start on the ruler strips themselves (Photoshop behaviour:
+  // top strip pulls out a horizontal guide, left strip a vertical one).
+  const hStrip = $('#rulerH');
+  const vStrip = $('#rulerV');
+  if (hStrip) hStrip.addEventListener('pointerdown', (e) => beginGuideDrag(e, 'h'));
+  if (vStrip) vStrip.addEventListener('pointerdown', (e) => beginGuideDrag(e, 'v'));
   if (RD.unit) {
     RD.unit.onclick = () => {
       const i = UNIT_ORDER.indexOf(currentRulerUnit());
@@ -1000,6 +1007,172 @@ function setRulersReady(on) {
   if (!rulersReady) RD.layer.classList.remove('marked');
   pinRulers();
   scheduleRulers(true);
+  if (guidesDirty) renderGuides();
+}
+
+/* ── Guides (Photoshop-style) ────────────────────────────────────────────── */
+/* Drag from the top ruler → horizontal guide; from the left ruler → vertical
+ * guide. Guides live on the active document in PDF points (zoom-independent,
+ * session-only — they are a view aid, not file content), render as % of the
+ * page wrap so zoom and scroll never need a repaint, snap to page edges,
+ * centre and other guides, and are deleted by dragging back onto a ruler or
+ * double-clicking them.                                             */
+
+let guidesDirty = false;
+let guideDrag = null;   // active drag state, null when idle
+let guideSeq = 0;
+
+function guidesOf() {
+  const doc = activeDoc();
+  if (!doc) return null;
+  if (!Array.isArray(doc.guides)) doc.guides = [];
+  return doc.guides;
+}
+
+function guideLayerOf(rec) {
+  if (!rec.guideLayer || !rec.guideLayer.isConnected) {
+    rec.guideLayer = el('div', { class: 'page-guides' });
+    rec.wrap.appendChild(rec.guideLayer);
+  }
+  return rec.guideLayer;
+}
+
+/** Rebuild every page's guide overlay from doc.guides. Cheap: guides are
+ *  positioned in % of the page wrap, so zoom/scroll never call this. */
+export function renderGuides() {
+  guidesDirty = false;
+  if (!RD.layer) return;
+  const guides = guidesOf() || [];
+  for (const [i, rec] of pageEls) {
+    if (rec.wrap.classList.contains('hidden')) continue;
+    const layer = guideLayerOf(rec);
+    layer.innerHTML = '';
+    layer.style.display = rulersOn ? '' : 'none';
+    if (!rulersOn) continue;
+    const pd = pageDims(i);
+    if (!pd) continue;
+    for (const g of guides) {
+      if (g.page !== i) continue;
+      const node = el('div', {
+        class: `guide guide-${g.orient}`,
+        dataset: { gid: g.id },
+        title: 'Guide — drag to move, double-click to delete',
+      });
+      if (g.orient === 'h') node.style.top = `${clamp((g.pt / pd.h) * 100, 0, 100)}%`;
+      else node.style.left = `${clamp((g.pt / pd.w) * 100, 0, 100)}%`;
+      node.addEventListener('pointerdown', (e) => beginGuideDrag(e, g.orient, g));
+      node.addEventListener('dblclick', () => {
+        const list = guidesOf();
+        const at = list.findIndex((x) => x.id === g.id);
+        if (at >= 0) { list.splice(at, 1); guidesDirty = true; scheduleRulers(false); }
+      });
+      layer.appendChild(node);
+    }
+  }
+}
+
+export function clearGuides() {
+  const doc = activeDoc();
+  if (!doc || !Array.isArray(doc.guides) || !doc.guides.length) return;
+  doc.guides.length = 0;
+  guidesDirty = true;
+  scheduleRulers(false);
+}
+
+/** Snap pt to page edges, centre and sibling guides when within ~5px. */
+function snapGuidePt(pt, dim, orient, page, excludeId) {
+  const tol = 5 / Math.max(0.05, currentScale());
+  const targets = [0, dim / 2, dim];
+  for (const g of guidesOf() || []) {
+    if (g.orient === orient && g.page === page && g.id !== excludeId) targets.push(g.pt);
+  }
+  let best = pt, bestD = tol;
+  for (const t of targets) {
+    const d = Math.abs(pt - t);
+    if (d <= bestD) { best = t; bestD = d; }
+  }
+  return clamp(best, 0, dim);
+}
+
+function beginGuideDrag(e, orient, existing = null) {
+  if (!rulersOn || e.button !== 0) return;
+  if (!activeDoc()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const page = RG.ref >= 0 ? RG.ref : rulerRefPage();
+  const pd = pageDims(page);
+  if (!pd) return;
+  const dim = orient === 'h' ? pd.h : pd.w;
+  const scale = Math.max(0.05, currentScale());
+  const strip = orient === 'h' ? RG.vRect : RG.hRect;  // the strip whose axis reads this guide's value
+  const wrap = pageEls.get(page)?.wrap;
+  if (!wrap) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const startClient = orient === 'h' ? e.clientY : e.clientX;
+
+  const id = existing ? existing.id : `g${page}_${orient}_${++guideSeq}`;
+  const toPt = (client) => (client - (orient === 'h' ? wrapRect.top : wrapRect.left)) / scale;
+  const toClient = (pt) => (orient === 'h' ? wrapRect.top : wrapRect.left) + pt * scale;
+
+  const guide = { id, page, orient, pt: snapGuidePt(toPt(startClient), dim, orient, page, existing?.id) };
+
+  const preview = el('div', { class: `guide guide-${orient} guide-drag` });
+  preview.style.position = 'fixed';
+  preview.style.zIndex = '90';
+  const place = (pt) => {
+    if (orient === 'h') {
+      preview.style.left = `${wrapRect.left}px`;
+      preview.style.width = `${wrapRect.width}px`;
+      preview.style.top = `${toClient(pt)}px`;
+    } else {
+      preview.style.top = `${wrapRect.top}px`;
+      preview.style.height = `${wrapRect.height}px`;
+      preview.style.left = `${toClient(pt)}px`;
+    }
+  };
+  place(guide.pt);
+  document.body.appendChild(preview);
+  // Hide the live copy while its preview follows the pointer.
+  const live = existing ? document.querySelector(`.guide[data-gid="${CSS.escape(existing.id)}"]`) : null;
+  if (live) live.style.visibility = 'hidden';
+
+  const overRuler = (ev) =>
+    (RG.hRect && ev.clientY >= RG.hRect.top && ev.clientY <= RG.hRect.bottom)
+    || (RG.vRect && ev.clientX >= RG.vRect.left && ev.clientX <= RG.vRect.right);
+
+  const onMove = (ev) => {
+    if (!guideDrag) return;
+    guideDrag.pt = snapGuidePt(toPt(orient === 'h' ? ev.clientY : ev.clientX), dim, orient, page, existing?.id);
+    guideDrag.delete = overRuler(ev);
+    place(guideDrag.pt);
+    preview.classList.toggle('guide-kill', guideDrag.delete);
+  };
+  const onUp = (ev) => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    const pt = guideDrag ? guideDrag.pt : guide.pt;
+    const kill = guideDrag ? guideDrag.delete : false;
+    preview.remove();
+    guideDrag = null;
+    const list = guidesOf();
+    if (!list) { renderGuides(); return; }
+    if (kill || overRuler(ev)) {
+      if (existing) {
+        const at = list.findIndex((x) => x.id === existing.id);
+        if (at >= 0) list.splice(at, 1);
+      }
+    } else if (existing) {
+      existing.pt = pt;
+    } else {
+      guide.pt = pt;
+      list.push(guide);
+    }
+    guidesDirty = true;
+    scheduleRulers(false);
+  };
+  guideDrag = { orient, page, id, pt: guide.pt, delete: false };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
 }
 
 /** Turn the rulers on or off. Safe to call from a menu action in app.js.

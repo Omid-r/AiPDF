@@ -273,6 +273,7 @@ function buildMenu(send, opts = {}) {
         { label: 'Show Grid', accelerator: "CmdOrCtrl+'", click: () => send('view:grid') },
         { label: 'Reverse View', click: () => send('view:reverse') },
         { label: 'Read This Page Aloud', click: () => send('view:readAloud') },
+        { label: 'Read Aloud Settings…', click: () => send('view:ttsSettings') },
         { type: 'separator' },
         { label: 'Collapse the Ribbon', accelerator: 'CmdOrCtrl+F1', type: 'checkbox', checked: false, click: (mi) => { send('view:ribbonToggle'); mi.checked = !mi.checked; } },
         { label: 'Show / Hide Toolbars', accelerator: 'CmdOrCtrl+F11', click: () => send('view:chromeToggle') },
@@ -282,6 +283,7 @@ function buildMenu(send, opts = {}) {
         { type: 'separator' },
         { label: 'Toggle Dark Mode', accelerator: 'CmdOrCtrl+Shift+D', click: () => send('view:darkMode') },
         { label: 'Show Rulers', accelerator: 'CmdOrCtrl+Shift+R', click: () => send('view:rulers') },
+        { label: 'Clear Guides', click: () => send('view:clearGuides') },
         { label: 'Presentation Mode', accelerator: 'CmdOrCtrl+Shift+F', click: () => send('view:presentation') },
         { label: 'Toggle Full Screen', role: 'togglefullscreen' },
         { type: 'separator' },
@@ -346,7 +348,7 @@ function buildMenu(send, opts = {}) {
         { label: 'Add Link…', click: () => send('tool:link') },
         { label: 'Remove Added Links…', click: () => send('edit:removeLinks') },
         { type: 'separator' },
-        { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: () => send('view:find') },
+        { label: 'Find…', click: () => send('view:search') },
         { label: 'Find & Replace…  (Ctrl+H)', click: () => send('edit:replace') },
         { type: 'separator' },
         { label: 'Recognise Text (OCR) — Current Page', click: () => send('ocr:page') },
@@ -380,6 +382,8 @@ function buildMenu(send, opts = {}) {
     {
       label: '&Protect',
       submenu: [
+        { label: 'AI Smart Redact…  (Ctrl+Alt+R)', accelerator: 'CmdOrCtrl+Alt+R', click: () => send('ai:smartredact') },
+        { type: 'separator' },
         { label: 'Encrypt with Password…', click: () => send('protect:encrypt') },
         { label: 'Apply & Sanitize Redactions', click: () => send('protect:redactAll') },
         { type: 'separator' },
@@ -454,6 +458,9 @@ function buildMenu(send, opts = {}) {
         { label: 'Rewrite Selection…', click: () => send('ai:rewrite') },
         { label: 'Proofread', click: () => send('ai:proofread') },
         { type: 'separator' },
+        { label: 'Contract Review…', click: () => send('ai:contract') },
+        { label: 'Document Outline', click: () => send('ai:outline') },
+        { type: 'separator' },
         { label: 'Configure AI…', click: () => send('ai:settings') },
       ],
     },
@@ -474,7 +481,7 @@ function buildMenu(send, opts = {}) {
     {
       label: '&Help',
       submenu: [
-        { label: 'Start page', accelerator: 'CmdOrCtrl+Shift+H', click: () => send('help:startPage') },
+        { label: 'Start page  (Ctrl+Alt+H)', accelerator: 'CmdOrCtrl+Alt+H', click: () => send('help:startPage') },
         { type: 'separator' },
         { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', click: () => send('help:shortcuts') },
         { label: 'About AiPDF Editor', click: () => send('help:about') },

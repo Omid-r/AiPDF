@@ -1,8 +1,8 @@
 {
   "name": "aipdf-editor",
   "productName": "AiPDF Editor",
-  "version": "2.9.1",
-  "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance and an agentic AI bot",
+  "version": "2.12.0",
+  "description": "AiPDF Editor — a modern Electron-based PDF viewer & editor with AI assistance, contract intelligence, smart redaction, multi-provider read-aloud and an agentic AI bot",
   "main": "src/main/main.js",
   "author": "manjayofficial01-ui",
   "license": "MIT",
@@ -21,6 +21,8 @@
     "test:ocr-packaged": "node scripts/ocr-diag.mjs",
     "test:hand": "node scripts/hand-tool-test.mjs",
     "test:menu": "node scripts/menu-test.mjs",
+    "test:wiring": "node scripts/wiring-test.mjs",
+    "test:walk": "node scripts/gui-walkthrough-test.mjs",
     "test:key": "node scripts/key-test.mjs",
     "test:text": "node scripts/text-tool-test.mjs",
     "test:reflow": "node --max-old-space-size=1024 scripts/reflow-test.mjs",
@@ -34,7 +36,12 @@
     "test:markup": "node scripts/markup-test.mjs",
     "test:textbox": "node scripts/textbox-resize-test.mjs",
     "test:wheel": "node scripts/ctrl-wheel-zoom-test.mjs",
+    "test:tables": "node scripts/table-detect-test.mjs && node scripts/table-fixture-test.mjs && node scripts/table-cell-blocks-test.mjs",
+    "test:table-ui": "node scripts/table-cell-test.mjs",
     "test:stirling": "node scripts/stirling-test.mjs",
+    "test:tablecell": "node scripts/table-cell-split-test.mjs",
+    "test:aidocs": "node scripts/aidocs-test.mjs",
+    "test:tts": "node scripts/tts-test.mjs",
     "test:overlay": "node scripts/overlay-test.mjs",
     "test:doctools": "node scripts/doctools-test.mjs",
     "test:resize": "node scripts/resize-test.mjs",
@@ -53,7 +60,8 @@
       "assets/icon.ico",
       "assets/icon.png",
       "node_modules/**",
-      "package.json"
+      "package.json",
+      "!dist*/**"
     ],
     "extraResources": [
       { "from": "vendor/tessdata", "to": "tessdata" }

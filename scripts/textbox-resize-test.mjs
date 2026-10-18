@@ -7,15 +7,20 @@
  */
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { rmSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe');
 const FIXTURE = path.join(ROOT, '.fixtures', 'fixture.pdf');
 const PORT = 9549;
-const UD = path.join(ROOT, '.smoke', 'textbox-resize-ud');
-rmSync(UD, { recursive: true, force: true });
+/* A per-run user-data dir in the OS temp area, not a fixed one in the repo.
+ * A fixed dir has to be bulk-deleted on every run, and a recursive delete of a
+ * user-data tree trips the environment's bulk-delete guard once it passes ~50
+ * files — so the suite would pass once and then refuse to start. A fresh path
+ * needs no delete at all and leaves the repo clean. */
+const UD = path.join(os.tmpdir(), `aipdf-textbox-resize-${process.pid}-${Date.now()}`);
 mkdirSync(path.dirname(UD), { recursive: true });
 
 const env = { ...process.env };
@@ -94,6 +99,16 @@ check('a text block is hit-testable', !!block, block ? '' : 'no editable block f
 if (block) {
   await click(block.x, block.y);
   await sleep(700);
+  // Clicking a block now asks for the text first (the detected text is
+  // prefilled). This suite is about the box that a commit produces, so accept
+  // the detected text as-is and carry on.
+  const asked = await ev(`!!document.querySelector('.de-ask-text')`);
+  if (asked) {
+    await ev(`document.querySelector('.de-ask-text').focus()`);
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+    await sleep(500);
+  }
   const opened = await ev(`!!document.querySelector('.direct-editor-surface')`);
   check('clicking a block opens the Direct Editor', opened);
   if (opened) {

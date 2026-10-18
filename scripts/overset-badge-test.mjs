@@ -134,6 +134,17 @@ if (!block) { console.log('OB_FAIL no editable block on the fixture'); child.kil
 await click(block.x, block.y);
 await sleep(300);
 
+// The click asks for the text first (prefilled with the detected text). This
+// suite retypes the block afterwards, so accept the detected text and continue.
+if (await ev(`!!document.querySelector('.de-ask-text')`)) {
+  await ev(`document.querySelector('.de-ask-text').focus()`);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+  await sleep(500);
+}
+check('answering the text question opens the editor',
+  (await ev(`!!document.querySelector('.direct-editor-surface')`)) === true);
+
 /* ══ 2. A story that cannot fit must be reported, not silently clipped ════ */
 
 // Long enough to need several lines inside a one-line-tall block, so the frame

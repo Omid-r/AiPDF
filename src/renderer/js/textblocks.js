@@ -16,6 +16,14 @@
  *  arrives as several names and every line becomes its own block. */
 const styleKey = (family, size) => `${String(family || 'Helvetica').toLowerCase()}@${(size || 10).toFixed(1)}`;
 
+/** A whitespace-only run far wider than a normal space is a POSITIONING
+ *  artifact: producers bridge a table gutter with a stretched space or a TJ
+ *  offset, and the run is then technically contiguous with the next cell. Left
+ *  alone it glues two cells into one editable block, which a cell edit would
+ *  then delete as a unit. A normal space is ~0.25em; anything over 2em is a
+ *  gutter, not a word space. */
+const wideSpace = (r) => /^\s+$/.test(r.text || '') && (r.width || 0) > (r.size || 10) * 2;
+
 /** Rotation bucket in whole degrees, snapped to the quadrant. Text at 89.7°
  *  and 90.3° is the same rotation as far as reading order is concerned. */
 const rotBucket = (rad) => (Math.round((rad * 180) / Math.PI / 90) * 90 + 360) % 360;
@@ -29,11 +37,19 @@ const clampNum = (v, lo, hi) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, 
  * `baseline`, `size`, `fontFamily`, `maxWidth`, `maxHeight`, `lineHeight`,
  * `itemIndices` and a stable `key`.
  */
-export function groupTextBlocks(tc, pageWidth = 595) {
+/**
+ * pdf.js text items → positioned runs, in reading order.
+ *
+ * `only` restricts the result to a set of item indices while KEEPING each run's
+ * original page-level index — that is what lets a table cell regroup just its
+ * own items and still produce blocks whose `itemIndices` point at the real page
+ * items (so excision and `key` stay correct).
+ */
+export function textRuns(tc, only = null) {
   if (!tc || !Array.isArray(tc.items)) return [];
-
   const runs = [];
   for (let index = 0; index < tc.items.length; index++) {
+    if (only && !only.has(index)) continue;
     const it = tc.items[index];
     if (!it || !it.str || !it.transform) continue;
     if (it.dir === 'ttb') continue;               // vertical writing: out of scope
@@ -68,10 +84,37 @@ export function groupTextBlocks(tc, pageWidth = 595) {
       eol: !!it.hasEOL,
     });
   }
-  if (!runs.length) return [];
+  /* A gutter-bridging space is a positioning artifact, not content, so drop it
+   * before grouping. Left in the stream it does one of two wrong things: it
+   * glues two cells into a single editable block, or — once the merge guards
+   * below refuse to attach it — it becomes a stray " " block of its own that
+   * sits over the gutter and destroys the column boundary. */
+  for (let i = runs.length - 1; i >= 0; i--) if (wideSpace(runs[i])) runs.splice(i, 1);
 
   // Reading order: top-to-bottom, then left-to-right, within a rotation group.
   runs.sort((a, b) => b.y - a.y || a.x - b.x);
+  return runs;
+}
+
+/**
+ * One axis-aligned box per text item, in PDF space — the item-level geometry a
+ * table needs to decide which CELL a piece of text belongs to. Block-level
+ * geometry cannot answer that when a producer emits a whole row as one run.
+ */
+export function textItemBoxes(tc) {
+  return textRuns(tc)
+    .filter((r) => r.rot === 0)
+    .map((r) => ({
+      index: r.index,
+      text: r.text,
+      size: r.size,
+      rect: [Math.min(r.x, r.end), r.y - r.size * 0.28, Math.max(r.x, r.end), r.y + r.size * 1.08],
+    }));
+}
+
+export function groupTextBlocks(tc, pageWidth = 595, only = null) {
+  const runs = textRuns(tc, only);
+  if (!runs.length) return [];
 
   /* ── Runs → lines ──────────────────────────────────────────────────── */
   const lines = [];
@@ -86,6 +129,8 @@ export function groupTextBlocks(tc, pageWidth = 595) {
       const drift = dx * last.n[0] + dy * last.n[1];        // across it
       const styleSame = styleKey(run.family, run.size) === styleKey(prev.family, prev.size);
       if (!last.eol
+        && !wideSpace(last)
+        && !wideSpace(run)
         && run.rot === prev.rot
         && styleSame
         && Math.abs(drift) < Math.max(1.2, run.size * 0.35)
@@ -140,37 +185,7 @@ export function groupTextBlocks(tc, pageWidth = 595) {
  * PDF space has y increasing upward, canvas has it downward — hence the flip.
  */
 export function blocksFromOcrLines(lines, pageWidth, pageHeight, dpi = 200, pageIndex = 0) {
-  if (!Array.isArray(lines) || !lines.length) return [];
-  const s = 72 / (dpi || 200);                      // px → pt
-  const flat = [];
-
-  for (let li = 0; li < lines.length; li++) {
-    const ln = lines[li];
-    const text = String(ln.text || '').trim();
-    if (!text) continue;
-    const bb = ln.bbox || {};
-    const x0 = Number(bb.x0) || 0, x1 = Number(bb.x1) || 0;
-    const y0 = Number(bb.y0) || 0, y1 = Number(bb.y1) || 0;
-    if (x1 <= x0 || y1 <= y0) continue;
-
-    // Median word height is the most reliable size signal Tesseract gives.
-    const hs = (ln.words || []).map((w) => (w.bbox?.y1 || 0) - (w.bbox?.y0 || 0)).filter((h) => h > 1).sort((a, b) => a - b);
-    const med = hs.length ? hs[Math.floor(hs.length / 2)] : (y1 - y0);
-    const boxH = (y1 - y0) * s;
-    const size = clampNum((med * s) / 0.72, 4, 96) || clampNum(boxH * 1.05, 4, 96);
-
-    const top = pageHeight - y0 * s;                // topmost y in PDF space
-    const bottom = pageHeight - y1 * s;
-    flat.push({
-      li, text,
-      x: x0 * s, end: x1 * s,
-      top, bottom,
-      baseline: bottom + 0.23 * boxH,
-      size, rot: 0, style: styleKey('Helvetica', Math.round(size)),
-      family: 'Helvetica',
-      confidence: ln.confidence ?? null,
-    });
-  }
+  const flat = flatOcrLines(lines, pageHeight, dpi);
   if (!flat.length) return [];
 
   /* Snapping the raw estimates to the page's modal size is the difference
@@ -211,6 +226,205 @@ export function blocksFromOcrLines(lines, pageWidth, pageHeight, dpi = 200, page
   }
 
   return groups.map((g) => finishBlock(g, pageWidth, 'o', null, g.lines.map((l) => l.li), pageIndex));
+}
+
+/**
+ * px → pt conversion for OCR lines (shared by blocksFromOcrLines and the
+ * table-aware OCR split in textedit.js). `li` is the index in the GIVEN array;
+ * callers that subset the lines must map ids back to the original themselves.
+ * Word boxes are kept so a line that spans several table columns can be cut
+ * at the gutters.
+ */
+export function flatOcrLines(lines, pageHeight, dpi = 200) {
+  if (!Array.isArray(lines) || !lines.length) return [];
+  const s = 72 / (dpi || 200);                      // px → pt
+  const flat = [];
+  for (let li = 0; li < lines.length; li++) {
+    const ln = lines[li];
+    const text = String(ln.text || '').trim();
+    if (!text) continue;
+    const bb = ln.bbox || {};
+    const x0 = Number(bb.x0) || 0, x1 = Number(bb.x1) || 0;
+    const y0 = Number(bb.y0) || 0, y1 = Number(bb.y1) || 0;
+    if (x1 <= x0 || y1 <= y0) continue;
+
+    // Median word height is the most reliable size signal Tesseract gives.
+    const words = Array.isArray(ln.words) ? ln.words : [];
+    const hs = words.map((w) => (w.bbox?.y1 || 0) - (w.bbox?.y0 || 0)).filter((h) => h > 1).sort((a, b) => a - b);
+    const med = hs.length ? hs[Math.floor(hs.length / 2)] : (y1 - y0);
+    const boxH = (y1 - y0) * s;
+    const size = clampNum((med * s) / 0.72, 4, 96) || clampNum(boxH * 1.05, 4, 96);
+
+    const top = pageHeight - y0 * s;                // topmost y in PDF space
+    const bottom = pageHeight - y1 * s;
+    flat.push({
+      li, text,
+      x: x0 * s, end: x1 * s,
+      top, bottom,
+      baseline: bottom + 0.23 * boxH,
+      size, rot: 0, style: styleKey('Helvetica', Math.round(size)),
+      family: 'Helvetica',
+      confidence: ln.confidence ?? null,
+      words,
+    });
+  }
+  return flat;
+}
+
+/**
+ * Cut OCR lines into column-candidate segments.
+ *
+ * Tesseract happily reads straight across a table row, so one "line" can
+ * contain several cells. Two boundary signals cut it apart:
+ *  - standalone "|" glyphs: the table RULES themselves survive OCR as pipes,
+ *    exactly on the column boundaries — split there and drop the pipe;
+ *  - word gaps clearly wider than normal spacing (≥ ~1.8 em) for borderless
+ *    tables.
+ * Lines without word boxes (AI-vision OCR) pass through as single segments.
+ */
+export function ocrSplitSegments(flat) {
+  const RULE_GLYPH = /^[|｜│︱︲]+$/;
+  const out = [];
+  for (const line of flat) {
+    const words = (line.words || []).filter((w) => w && w.bbox && String(w.text || '').trim());
+    if (words.length < 2) {
+      out.push({ i: out.length, li: line.li, rect: [line.x, line.bottom, line.end, line.top], text: line.text, size: line.size });
+      continue;
+    }
+    // Rescale word boxes onto the line's own pt span so the segmentation is
+    // dpi-independent, then cut at rule glyphs and wide gaps.
+    const wLine = Math.min(...words.map((w) => w.bbox.x0));
+    const wMax = Math.max(...words.map((w) => w.bbox.x1));
+    const k = (line.end - line.x) / Math.max(1, wMax - wLine); // px → pt for this line
+    const scaled = words.map((w) => ({
+      x0: line.x + (w.bbox.x0 - wLine) * k,
+      x1: line.x + (w.bbox.x1 - wLine) * k,
+      text: String(w.text || '').trim(),
+      rule: RULE_GLYPH.test(String(w.text || '').trim()),
+    }));
+    const threshold = Math.max(line.size * 1.8, 9);
+    let cur = null;
+    const segs = [];
+    const push = () => {
+      if (cur && cur.words.length) {
+        const text = cur.words.map((w) => w.text).join(' ').replace(/\s+/g, ' ').trim();
+        if (text) {
+          segs.push({
+            x0: Math.min(...cur.words.map((w) => w.x0)),
+            x1: Math.max(...cur.words.map((w) => w.x1)),
+            text,
+          });
+        }
+      }
+      cur = null;
+    };
+    for (const w of scaled) {
+      if (w.rule) { push(); continue; }         // a rule glyph is a boundary, not text
+      if (cur && w.x0 - cur.lastX1 >= threshold) push();
+      if (!cur) cur = { words: [], lastX1: w.x0 };
+      cur.words.push(w);
+      cur.lastX1 = w.x1;
+    }
+    push();
+    if (segs.length <= 1) {
+      out.push({ i: out.length, li: line.li, rect: [line.x, line.bottom, line.end, line.top], text: line.text, size: line.size });
+      continue;
+    }
+    for (const seg of segs) {
+      out.push({ i: out.length, li: line.li, rect: [seg.x0, line.bottom, seg.x1, line.top], text: seg.text, size: line.size });
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the OCR line list from a structured AI-vision response.
+ *
+ * The vision model sees table rules directly, so (as in the user's proven
+ * PDF→Word flow) it returns every TABLE CELL explicitly — row, col, text and
+ * its pixel bbox. Cell entries become ordinary lines (one per cell), and any
+ * freeform line whose centre falls inside a cell is dropped, since the model
+ * already emitted that text as the cell. Output matches the Tesseract line
+ * shape ({text, bbox, confidence}) so every downstream consumer — editable
+ * blocks, the per-cell table split, the Direct Editor — works unchanged.
+ * Returns [] when the payload holds nothing usable (caller falls back).
+ */
+export function buildStructuredOcrLines(ai) {
+  const raw = ai && typeof ai === 'object' ? ai : null;
+  const normBbox = (b) => {
+    const bb = b || {};
+    const x0 = Number(bb.x0), y0 = Number(bb.y0), x1 = Number(bb.x1), y1 = Number(bb.y1);
+    if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) return null;
+    return { x0, y0, x1, y1 };
+  };
+  const cells = [];
+  for (const table of Array.isArray(raw?.tables) ? raw.tables : []) {
+    for (const cell of Array.isArray(table?.cells) ? table.cells : []) {
+      const bbox = normBbox(cell?.bbox);
+      const text = String(cell?.text ?? '').trim();
+      if (!bbox || !text) continue; // an empty cell is a place to type, not a line
+      cells.push({ text, bbox, confidence: null, words: [] });
+    }
+  }
+  const freeform = [];
+  for (const ln of Array.isArray(raw?.lines) ? raw.lines : []) {
+    const bbox = normBbox(ln?.bbox);
+    const text = String(ln?.text ?? '').trim();
+    if (!bbox || !text) continue;
+    freeform.push({ text, bbox, confidence: ln.confidence ?? null, words: [] });
+  }
+  // Drop freeform lines the cell grid already accounts for.
+  const kept = freeform.filter((ln) => {
+    const cx = (ln.bbox.x0 + ln.bbox.x1) / 2, cy = (ln.bbox.y0 + ln.bbox.y1) / 2;
+    return !cells.some((c) => cx >= c.bbox.x0 && cx <= c.bbox.x1 && cy >= c.bbox.y0 && cy <= c.bbox.y1);
+  });
+  const out = [...kept, ...cells]
+    .sort((a, b) => (a.bbox.y0 - b.bbox.y0) || (a.bbox.x0 - b.bbox.x0));
+  return out;
+}
+
+/**
+ * Build ONE editable block for a table cell from the OCR line subset that
+ * lives in it. Geometry mirrors blocksFromOcrLines (same finishBlock step);
+ * `lineIds` keeps the ORIGINAL OCR line ids so the editor's identity/wash
+ * machinery keeps working, and `cellRect` clamps the ownership rectangle so
+ * an edit in this cell never excises the neighbour's text.
+ */
+export function ocrCellBlock(segments, flatByLi, cellRect, pageWidth, pageIndex = 0) {
+  const byLi = new Map();
+  for (const seg of segments) if (!byLi.has(seg.li)) byLi.set(seg.li, []);
+  for (const seg of segments) byLi.get(seg.li).push(seg);
+  const lineIds = [...byLi.keys()].sort((a, b) => a - b);
+  const g = { lines: [], x: Infinity, end: -Infinity, right: -Infinity };
+  for (const li of lineIds) {
+    const flat = flatByLi.get(li);
+    if (!flat) continue;
+    const segs = byLi.get(li);
+    const x0 = Math.min(...segs.map((s) => s.rect[0]));
+    const x1 = Math.max(...segs.map((s) => s.rect[2]));
+    g.lines.push({
+      li, text: segs.map((s) => s.text).join(' ').replace(/\s+/g, ' ').trim(),
+      x: x0, end: x1, top: flat.top, bottom: flat.bottom, baseline: flat.baseline,
+      size: flat.size, style: flat.style, family: flat.family, rot: 0,
+    });
+    g.x = Math.min(g.x, x0);
+    g.end = Math.max(g.end, x1);
+    g.right = Math.max(g.right, x1);
+  }
+  if (!g.lines.length) return null;
+  g.size = g.lines[0].size;
+  g.family = g.lines[0].family;
+  g.style = g.lines[0].style;
+  g.rot = 0;
+  const block = finishBlock(g, pageWidth, 'o', null, lineIds, pageIndex);
+  const own = [
+    Math.max(block.coverRect[0], cellRect[0]),
+    Math.max(block.coverRect[1], cellRect[1]),
+    Math.min(block.coverRect[2], cellRect[2]),
+    Math.min(block.coverRect[3], cellRect[3]),
+  ];
+  block.ownRect = (own[2] - own[0] > 0.5 && own[3] - own[1] > 0.5) ? own : block.coverRect.slice();
+  return block;
 }
 
 /** Shared finishing step: text, geometry and the stable identity key. */

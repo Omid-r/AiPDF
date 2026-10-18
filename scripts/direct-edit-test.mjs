@@ -167,8 +167,28 @@ const block = await ev(`(function(){
 if (!block) { console.log('DE_FAIL no editable block on the fixture'); child.kill(); process.exit(1); }
 
 await click(block.x, block.y);
+await sleep(300);
+
+/* The click now asks what the text should say, prefilled with the detected
+ * text, before any editing starts. This suite is about what happens AFTER that
+ * question, so accept the detected text and continue. */
+const asked = await ev(`(function(){
+  var m = document.querySelector('.modal');
+  var ta = m && m.querySelector('.de-ask-text');
+  return ta ? { value: ta.value, hint: (m.querySelector('.hint') || {}).textContent || '' } : null;
+})()`);
+check('the click asks for the text before editing', !!asked, JSON.stringify(asked));
+check('the question is prefilled with the detected block text',
+  !!asked && String(asked.value || '').trim().length > 0, asked && JSON.stringify(asked.value));
+check('no editor opens until the question is answered',
+  (await ev(`!document.querySelector('.direct-editor-surface')`)) === true);
+await ev(`document.querySelector('.de-ask-text').focus()`);
+await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
+await sleep(500);
+
 let s = await editorState();
-check('clicking a text block opens the inline editor', s.open === true, JSON.stringify(s).slice(0, 120));
+check('answering the question opens the inline editor', s.open === true, JSON.stringify(s).slice(0, 120));
 
 const opened = s;
 

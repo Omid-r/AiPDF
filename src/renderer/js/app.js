@@ -7,7 +7,7 @@ import {
 import * as V from './viewer.js';
 import { loadPdfBytes, buildPages, relayout, renderVisible, scrollToPage, renderPageToCanvas, applyLayoutToDom, currentScale, pageDims, pageEl, rerenderAllPages } from './viewer.js';
 import { loadFileAnnotations, renderPageAnnotations, renderAllAnnotations, ANNOT_TYPES, makeAnnot, normalizeRect, loadAttachments } from './annots.js';
-import { loadStoredUserFonts, customFontFamilies, isUserFont, removeUserFont, registerCustomFont, getFontkit } from './fonts.js';
+import { loadStoredUserFonts, customFontFamilies, isUserFont, removeUserFont, registerCustomFont, getFontkit, listSystemFonts, addSystemFont } from './fonts.js';
 import { indexDocumentFonts, resetDocumentFonts, resolveFontFor } from './fontresolve.js';
 import { buildPdf, buildBlank, buildFromImages, buildExtract, buildMerge, readMetadata, probeEncryption, drainFontSubstitutions, buildNup, buildSingleStrip, buildPoster, buildBooklet, buildRepaired } from './pdfwrite.js';
 import { initSidebar, renderSidebar, setSidebar, renderSidebarChrome } from './sidebar.js';
@@ -17,7 +17,10 @@ import { runSearch, nextMatch, prevMatch, clearHighlights } from './search.js';
 import { loadFormFields, renderFormFields, startFieldPlacement, exportFormData, importFormData, resetForm } from './forms.js';
 import { watermarkDialog, headerFooterDialog, batesDialog, signatureDialog } from './stamps.js';
 import { deletePages, rotatePages, extractPages, insertBlankAt, insertFromPdfAt, mergeDocuments, splitDocument, splitByBookmarks, splitByBlankPages, duplicatePages, reversePages, replacePageAt, cropPages, undoStructure, redoStructure, reloadDocFromBytes } from './pages.js';
-import { initAI, aiStatusLabel, aiReady, renderAIDock, configureAI, ask, summarize, translate, proofread, rewrite, openAIDock, extractData, aiSelfTest } from './ai.js';
+import { initAI, aiStatusLabel, aiReady, renderAIDock, configureAI, ask, summarize, translate, proofread, rewrite, openAIDock, extractData, outline as aiOutline, aiSelfTest } from './ai.js';
+import { openSmartRedact } from './smartredact.js';
+import { runContractReview } from './contract.js';
+import { toggleReadAloud as ttsToggle, stopReadAloud as ttsStop, openTtsSettings } from './tts.js';
 import { runAgent, agentSelfTest } from './agent.js';
 import { detectScannedPages, OCR_LANGS } from './ocr.js';
 import { buildComparison, comparisonReport, jumpToPage } from './compare.js';
@@ -86,6 +89,9 @@ async function boot() {
   window.api.on('menu:action', onMenuAction);
   window.api.on('app:openPath', (p) => openDocFromPath(p));
   window.api.on('app:willClose', onWillClose);
+  // AI Smart Redact's "Mark + Apply & Sanitize" button lives in a dialog that
+  // must not import app.js (circular) — it signals over the store bus instead.
+  on('smartredact:apply', () => { applyRedactions(true); });
   // Headless OCR test (main.js --ocr-test): runs Tesseract on page 1 of the
   // open document and reports confidence + a text sample. Requires network
   // for the first language-pack download; results are cached afterwards.
@@ -136,6 +142,15 @@ async function boot() {
 
   window.api.ready();
   window.__aipdfBooted = true;
+  // Test hooks (gui-walkthrough-test.mjs): drive the same action table the
+  // native menu uses, and read live app state without reaching into modules.
+  window.__aipdfAction = (action, payload) => onMenuAction(action, payload);
+  window.__aipdfState = state;
+  window.__aipdfSettings = settings;
+  // Table/OCR tests: test mode never auto-opens a file, so they open explicitly.
+  window.__aipdfOpenPath = (p) => openDocFromPath(p);
+  // Table tests: inspect the editable block list (native or OCR) for a page.
+  window.__aipdfEditableSource = (pageIndex) => editableSource(pageIndex);
   // Mark the lazy modules as importable (the boot test probes these).
   import('./ocr.js').then(() => { window.__aipdfOcrReady = true; }).catch(() => {});
   import('./fonts.js').then(() => { window.__aipdfFontsReady = true; }).catch(() => {});
@@ -168,6 +183,34 @@ async function boot() {
       welcomeHidden,
       pagesVisible,
     };
+  };
+
+  // Direct Editor inspection for the live tests: the committed edit records,
+  // including the table/cell structure a cell edit carries.
+  window.__aipdfGetTextEdits = () => (activeDoc()?.textEdits || []).map((e) => ({
+    id: e.id, page: e.page, text: e.text, mode: e.mode,
+    frames: (e.frames || []).map((f) => ({ page: f.page, rect: f.rect })),
+    table: e.table || null,
+    overset: e.overset || null,
+    removal: e.removal || null,
+  }));
+
+  // Build the current document and read a page's text back through pdf.js —
+  // what a reader/search would see. Lets the table test prove a cell edit is
+  // truthful in the SAVED file, not only on screen.
+  window.__aipdfSaveAndExtract = async (pageIndex = 0) => {
+    const d = activeDoc();
+    if (!d) return { error: 'no active doc' };
+    const bytes = await buildPdf(d);
+    if (!bytes || !bytes.length) return { error: 'buildPdf produced no bytes' };
+    const pdf = await V.pdfjs.getDocument({ data: bytes.slice(0), isEvalSupported: false }).promise;
+    try {
+      const page = await pdf.getPage(pageIndex + 1);
+      const tc = await page.getTextContent();
+      return { bytes: bytes.length, text: tc.items.map((i) => i.str).join(' ') };
+    } finally {
+      await pdf.destroy();
+    }
   };
 
   // Headless AI self-test (main.js --ai-test). Pure-logic checks of the
@@ -1138,6 +1181,7 @@ function ribbonGroupsForMode() {
         { icon: 'pages', label: 'Cover', act: () => onMenuAction('view:cover'), active: () => !!state.view.coverPage },
         { icon: 'grid', label: 'Grid', act: () => onMenuAction('view:grid'), active: () => !!settings.grid },
         { icon: 'reverse', label: 'Reverse', act: () => onMenuAction('view:reverse'), active: () => !!state.view.reverse },
+        { icon: 'ruler', label: 'Show rulers', act: () => onMenuAction('view:rulers'), active: () => !!V.rulersVisible?.() },
       ] },
       { title: 'Rotate', items: [
         { icon: 'rotate', label: 'Rotate right', act: () => onMenuAction('view:rotateCW') },
@@ -1153,6 +1197,7 @@ function ribbonGroupsForMode() {
       ] },
       { title: 'Read', items: [
         { icon: 'readAloud', label: 'Read aloud', act: () => onMenuAction('view:readAloud') },
+        { icon: 'settings', label: 'Read aloud settings…', act: () => onMenuAction('view:ttsSettings') },
         { icon: 'present', label: 'Present', act: () => togglePresentation() },
         { icon: state.view.dark ? 'sun' : 'moon', label: state.view.dark ? 'Light' : 'Dark', act: () => { settings.theme = state.view.dark ? 'light' : 'dark'; applyTheme(); saveSettings(); renderRibbon(); } },
       ] },
@@ -3056,6 +3101,64 @@ const TOOL_PROPS = new Set(['rect', 'ellipse', 'line', 'arrow', 'ink', 'brush', 
 const TOOL_SIZE_KEY = { ink: 'borderWidth', brush: 'brushSize', highlighter: 'highlighterSize' };
 const TOOL_SIZE_FALLBACK = { borderWidth: 1.5, brushSize: 6, highlighterSize: 16 };
 
+/* ── Local fonts in the text/font pickers ──────────────────────────────── */
+
+let systemFacesPromise = null;
+function systemFaces() {
+  systemFacesPromise ??= listSystemFonts().then((r) => r.faces || []);
+  return systemFacesPromise;
+}
+
+/**
+ * Give a font <select> a "Local fonts" group fed from the fonts installed on
+ * this machine (Windows user + system font directories, indexed once by the
+ * main process). Picking a face copies it into the app font store
+ * (fonts.js addSystemFont) so it embeds on save exactly like an uploaded
+ * font — the standard-14 fallback would write non-WinAnsi glyphs as "?".
+ * prevOnChange preserves whatever binding the picker already had; `apply`
+ * receives the registered family for a fresh pick.
+ */
+function attachLocalFonts(sel, apply, prevOnChange) {
+  const grp = el('optgroup', { label: 'Local fonts' });
+  sel.appendChild(grp);
+  const loading = el('option', { value: '__sysLoading__', text: 'Loading local fonts…' });
+  grp.appendChild(loading);
+  systemFaces().then((faces) => {
+    loading.remove();
+    if (!faces.length) { grp.remove(); return; } // no machine faces → no group at all
+    const cur = sel.value;
+    const present = new Set([...sel.options].map((o) => o.value));
+    const byFamily = new Map();
+    for (const f of faces) if (!byFamily.has(f.family)) byFamily.set(f.family, f);
+    for (const [family, face] of [...byFamily.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      if (present.has(family)) continue;
+      grp.appendChild(el('option', {
+        value: 'sys:' + family,
+        text: face.style ? `${family} (${face.style})` : family,
+        'data-sys-family': family,
+      }));
+    }
+    sel.value = cur; // the async fill must not move the picker
+    if (sel.value !== cur) sel.value = sel.options[0] ? sel.options[0].value : '';
+  }).catch((e) => {
+    grp.remove();
+    console.warn('[fonts] local font list unavailable:', e?.message || e);
+  });
+  sel.onchange = async () => {
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    const family = opt && opt.dataset ? opt.dataset.sysFamily : null;
+    if (!family) { if (prevOnChange) prevOnChange(); else apply(sel.value); return; }
+    const face = (await systemFaces()).find((f) => f.family === family);
+    if (!face) { toast('That font is no longer installed.', 'warn'); return; }
+    const r = await addSystemFont(face);
+    if (!r.ok) { toast(r.error || 'Could not register the local font.', 'err', 5000); return; }
+    opt.value = r.family;
+    opt.textContent = r.family;
+    delete opt.dataset.sysFamily;
+    apply(r.family);
+  };
+}
+
 /* Foxit's Typewriter tool panel: Font, Size, Text colour, Bold / Italic style
  * and Alignment. Shared by the armed Text Box tool and the selected-text-box
  * property panel so both read identically. `get`/`set` let each caller bind to
@@ -3075,6 +3178,7 @@ function textPropsGroup(get, set) {
   }
   fam.value = get.fontFamily || 'Helvetica';
   fam.onchange = () => set.fontFamily(fam.value);
+  attachLocalFonts(fam, (v) => set.fontFamily(v), fam.onchange);
 
   const size = el('input', { type: 'number', min: '4', max: '144', value: String(get.fontSize || 11), style: { width: '100%' } });
   size.onchange = () => set.fontSize(Number(size.value));
@@ -3256,6 +3360,7 @@ function renderToolProps(host, panel) {
             sel.value = S.fontFamily;
           }
           sel.onchange = () => applyDirectFormat({ fontFamily: sel.value });
+          attachLocalFonts(sel, (v) => applyDirectFormat({ fontFamily: v }), sel.onchange);
           return sel;
         })()]),
       ]),
@@ -3674,6 +3779,17 @@ function renderTextEditProps(e, host, panel, box = null) {
   g1.appendChild(row);
   host.appendChild(g1);
 
+  // Recognised table structure: the panel names the cell and the table it
+  // belongs to, so "which cell am I editing?" is answered, not guessed.
+  if (e.table) {
+    const tg = el('div', { class: 'prop-group' });
+    tg.appendChild(el('div', { class: 'prop-title', text: 'Table' }));
+    tg.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Cell' }), el('span', { text: `R${(e.table.row ?? 0) + 1}C${(e.table.col ?? 0) + 1}` })]));
+    tg.appendChild(el('div', { class: 'kv' }, [el('b', { text: 'Table size' }), el('span', { text: `${e.table.rows || '?'}×${e.table.cols || '?'}` })]));
+    tg.appendChild(el('div', { class: 'hint', text: 'This text is a table cell. Edits wrap inside the cell; a cell too small for its text is reported as overset, never clipped silently.' }));
+    host.appendChild(tg);
+  }
+
   /* ── Story: the authoring model behind this edit ──────────────────────────
      The three explicit actions the research asks for live here, each named for
      what it does rather than a single ambiguous "Link". */
@@ -3992,6 +4108,9 @@ const COMMANDS = [
   ['View', 'Single page', 'file', 'view:single'],
   ['View', 'Continuous', 'pages', 'view:continuous'],
   ['View', 'Facing pages', 'grid', 'view:facing'],
+  ['View', 'Show rulers', 'ruler', 'view:rulers'],
+  ['View', 'Read aloud', 'readAloud', 'view:readAloud'],
+  ['View', 'Read aloud settings…', 'settings', 'view:ttsSettings'],
   ['View', 'Toggle dark mode', 'moon', 'view:darkMode'],
   ['View', 'Presentation mode', 'present', 'view:presentation'],
   ['Comment', 'Highlight', 'highlight', 'tool:highlight'],
@@ -4036,6 +4155,7 @@ const COMMANDS = [
   ['Documents', 'Add page numbers…', 'table', 'docs:pageNumbers'],
   ['Documents', 'Automate (pipeline)…', 'wand', 'docs:automate'],
   ['Protect', 'Unlock form fields…', 'unlock', 'protect:unlockForms'],
+  ['Protect', 'AI Smart Redact…', 'shield', 'ai:smartredact'],
   ['AI', 'Ask AI', 'ai', 'ai:ask'],
   ['AI', 'Summarise document', 'sparkle', 'ai:summarize'],
   ['AI', 'Compare all open documents', 'brain', 'ai:summarizeAll'],
@@ -4043,6 +4163,8 @@ const COMMANDS = [
   ['AI', 'Translate…', 'translate', 'ai:translate'],
   ['AI', 'Rewrite selection…', 'wand', 'ai:rewrite'],
   ['AI', 'Proofread', 'check', 'ai:proofread'],
+  ['AI', 'Contract review…', 'file', 'ai:contract'],
+  ['AI', 'Document outline', 'book', 'ai:outline'],
   ['AI', 'AI settings', 'settings', 'ai:settings'],
   ['Export', 'Export text…', 'download', 'export:text'],
   ['Export', 'Export pages as images…', 'image', 'export:images'],
@@ -4459,41 +4581,16 @@ function toggleGrid() {
   saveSettings();
 }
 
-/** Foxit View > Read > Activate Read / Stop Read: speak the current page with
- *  the platform voice. Chromium exposes speechSynthesis in the renderer; the
- *  utterance is built from the page's extracted text so it stays in sync with
- *  what the user sees. */
-let readAloud = null;
+/** Foxit View > Read > Activate Read / Stop Read. Delegates to tts.js, which
+ *  speaks through the configured provider — the local platform voice by
+ *  default, or ElevenLabs / Fish Audio / Mistral / Gemini / any
+ *  OpenAI-compatible endpoint with the user's own key. */
 function stopReadAloudIfAny() {
-  if (!readAloud) return;
-  try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
-  readAloud = null;
-  window.__aipdfReadAloud = false;
+  ttsStop();
 }
 
 async function toggleReadAloud() {
-  const synth = window.speechSynthesis;
-  if (!synth) { toast('This system has no speech voice available.', 'err'); return; }
-  if (readAloud) {
-    synth.cancel();
-    readAloud = null;
-    window.__aipdfReadAloud = false;
-    toast('Read aloud stopped', 'info');
-    return;
-  }
-  const d = activeDoc();
-  if (!d) return;
-  const text = (await V.getPageText(d.currentPage ?? 0) || '').trim();
-  if (!text) { toast('This page has no readable text.', 'warn'); return; }
-  const u = new SpeechSynthesisUtterance(text.slice(0, 8000));
-  u.rate = 1;
-  u.onend = () => { readAloud = null; window.__aipdfReadAloud = false; };
-  u.onerror = () => { readAloud = null; window.__aipdfReadAloud = false; };
-  synth.cancel();
-  synth.speak(u);
-  readAloud = u;
-  window.__aipdfReadAloud = true;   // readable by the headless parity test
-  toast(`Reading page ${(d.currentPage ?? 0) + 1} aloud — choose Read again to stop.`, 'ok', 4000);
+  await ttsToggle();
 }
 
 async function onMenuAction(action, payload) {
@@ -4575,6 +4672,7 @@ async function onMenuAction(action, payload) {
     }
 
     case 'view:rulers': V.toggleRulers(); break;
+    case 'view:clearGuides': V.clearGuides(); break;
     case 'view:fitPage': V.setZoom('fitPage'); break;
     case 'view:fitWidth': V.setZoom('fitWidth'); break;
     case 'view:actualSize': V.setZoom('custom', 1); break;
@@ -4588,6 +4686,7 @@ async function onMenuAction(action, payload) {
     case 'view:reverse': setReversePersist(!state.view.reverse); break;
     case 'view:grid': toggleGrid(); break;
     case 'view:readAloud': await toggleReadAloud(); break;
+    case 'view:ttsSettings': await openTtsSettings(); break;
     case 'view:rotateCW': V.setViewRotation(90); break;
     case 'view:rotateCCW': V.setViewRotation(-90); break;
     case 'view:darkMode': settings.theme = state.view.dark ? 'light' : 'dark'; applyTheme(); saveSettings(); renderRibbon(); break;
@@ -4672,7 +4771,17 @@ async function onMenuAction(action, payload) {
     case 'tool:ellipse': case 'tool:line': case 'tool:arrow': case 'tool:ink':
     case 'tool:brush': case 'tool:highlighter': case 'tool:formatPainter': case 'tool:eyedropper':
     case 'tool:eraser': case 'tool:stamp': case 'tool:image': case 'tool:signature':
+    case 'tool:note': case 'tool:callout': case 'tool:textbox': case 'tool:rect':
+    case 'tool:ellipse': case 'tool:line': case 'tool:arrow': case 'tool:ink':
+    case 'tool:brush': case 'tool:highlighter': case 'tool:formatPainter': case 'tool:eyedropper':
+    case 'tool:eraser': case 'tool:stamp': case 'tool:image': case 'tool:signature':
     case 'tool:redact': case 'tool:whiteout': case 'tool:measure': case 'tool:editText':
+    // Vertex + rounded shape tools have no native menu items today (the ribbon
+    // buttons call setTool directly) but must stay dispatchable so the action
+    // bus, command palette and future menu entries reach the same tools.
+    case 'tool:roundRect': case 'tool:polygon': case 'tool:polyline': case 'tool:cloud':
+    case 'tool:areaHighlight':
+    case 'tool:link':
       setTool(action.slice(5));
       break;
 
@@ -4828,6 +4937,9 @@ async function onMenuAction(action, payload) {
     case 'ai:translate': await translate(); break;
     case 'ai:rewrite': await rewrite(); break;
     case 'ai:proofread': await proofread(); break;
+    case 'ai:outline': await aiOutline(); break;
+    case 'ai:contract': await runContractReview(); break;
+    case 'ai:smartredact': await openSmartRedact(); break;
     case 'ai:settings': await configureAI(); break;
 
     case 'help:startPage':
