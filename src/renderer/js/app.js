@@ -4399,8 +4399,14 @@ function shortcutHelpHtml() {
 
 /** Drag a rectangle over a live page preview; the box-shadow trick dims
  *  everything outside the selection. Returns PDF-space [x0,y0,x1,y1]. */
-function cropRectDialog(doc, i) {
-  const dims = pageDims(i);
+async function cropRectDialog(doc, i) {
+  const page = await doc.pdf.getPage(i + 1);
+  // The preview renders with the intrinsic rotation plus the user's page
+  // delta, so this viewport is both the preview's aspect and the inverse that
+  // maps the drag box back into unrotated PDF user space for the CropBox.
+  const rotation = (page.rotate || 0) + (doc.pageRotate?.[i] || 0);
+  const vp = page.getViewport({ scale: 1, rotation });
+  const dims = { w: vp.width, h: vp.height };
   return new Promise((resolve) => {
     let sel = null;
     let start = null;
@@ -4413,6 +4419,32 @@ function cropRectDialog(doc, i) {
         borderRadius: '4px', overflow: 'hidden', touchAction: 'none', cursor: 'crosshair',
       },
     });
+    // The page thumbnail itself: without it the modal is a blank white box
+    // ("crop tool showing blank page — we can't see anything"). renderPageToCanvas
+    // resolves only after its render task completes, so the source canvas is
+    // fully painted when it is blitted into the stage.
+    const shot = el('canvas', {
+      style: {
+        position: 'absolute', inset: '0', width: PW + 'px', height: PH + 'px',
+        display: 'block', pointerEvents: 'none',
+      },
+    });
+    stage.appendChild(shot);
+    (async () => {
+      try {
+        const src = await renderPageToCanvas(i, 150);
+        if (!src) return;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+        shot.width = Math.round(PW * dpr);
+        shot.height = Math.round(PH * dpr);
+        const ctx = shot.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, shot.width, shot.height);
+        const s = Math.max(shot.width / src.width, shot.height / src.height);
+        const rw = src.width * s, rh = src.height * s;
+        ctx.drawImage(src, (shot.width - rw) / 2, (shot.height - rh) / 2, rw, rh);
+      } catch (e) { console.warn('crop preview failed', e); }
+    })();
     const box = el('div', {
       style: {
         position: 'absolute', display: 'none', border: '1px solid var(--accent)',
@@ -4458,9 +4490,11 @@ function cropRectDialog(doc, i) {
       ],
     }).then((ok) => {
       if (!ok) return resolve(null);
-      // Preview is top-down; PDF user space is bottom-up.
-      const sx = dims.w / PW, sy = dims.h / PH;
-      resolve([sel.l * sx, dims.h - sel.b * sy, sel.r * sx, dims.h - sel.t * sy]);
+      // The stage box is in top-down preview pixels; hand it back through the
+      // viewport inverse so a rotated page still yields the right CropBox.
+      const toPdf = (x, y) => vp.convertToPdfPoint((x * vp.width) / PW, (y * vp.height) / PH);
+      const a = toPdf(sel.l, sel.t), b = toPdf(sel.r, sel.b);
+      resolve([Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])]);
     });
   });
 }
