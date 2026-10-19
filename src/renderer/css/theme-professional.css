@@ -1,0 +1,47 @@
+/* Professional document-editor layer. Loaded after app.css. */
+:root {
+  --text-1:#1c2430; --text-2:#3d4a5c; --text-3:#5c6b7e;
+  --border:#d5deea; --border-strong:#c3cedb; --border-control:#8ea0b5;
+  --surface:#fff; --surface-raised:#fff; --surface-sunken:#f4f7fb; --bg-sunken:#eef2f6;
+  --desk:#e7edf4; --tool:#f7f9fc; --tool-hover:#eef3f8; --tool-active:#e4edf6;
+  --accent:#1d4f91; --accent-hover:#163e73; --accent-ink:#163e73;
+  --accent-solid:#1d4f91; --accent-solid-hover:#163e73;
+  --accent-soft:#e8f0fa; --accent-softer:#f4f8fc; --accent-line:#c5d7ef;
+  --accent-text:#fff; --accent-rgb:29,79,145;
+  --brand-mark:linear-gradient(145deg,#2f6fbf,#1d4f91);
+  --ring:rgba(29,79,145,.48); --selection:rgba(29,79,145,.16); --panel-3:#eef3f8;
+  --field-border:#1d4f91; --h-ribbon:72px; --ctl-rbtn:36px; --ctl-ring:20px;
+}
+[data-theme="dark"], body.dark {
+  --text-1:#e8eef5; --text-2:#c5d0dc; --text-3:#9aabbd;
+  --surface:#232a33; --surface-raised:#2b3340; --surface-sunken:#1b2129;
+  --bg-sunken:#151a20; --desk:#12171d;
+  --border:#394656; --border-strong:#4b5c70; --border-control:#6d8096;
+  --tool:#2b3340; --tool-hover:#344155; --tool-active:#3d4d62;
+  --accent:#8eb6e8; --accent-hover:#b7d2f4; --accent-ink:#b7d2f4;
+  --accent-solid:#2f6fbf; --accent-solid-hover:#3d7ed0;
+  --accent-soft:rgba(47,111,191,.22); --accent-softer:rgba(47,111,191,.12);
+  --accent-line:rgba(142,182,232,.38); --accent-text:#fff; --accent-rgb:142,182,232;
+  --brand-mark:linear-gradient(145deg,#3d7ed0,#1d4f91);
+  --ring:rgba(142,182,232,.72); --selection:rgba(142,182,232,.22);
+  --panel:#232a33; --panel-2:#1b2129; --panel-3:#2b3340;
+}
+.titlebar,.menubar,.ribbon,.statusbar,.sidebar,.context,.rail{font-variant-numeric:tabular-nums}
+.brand-name{letter-spacing:-.3px}
+.qbtn,.icon-btn,.rail-btn,.tbtn,.zoom-pill button,.tool-pair button{width:32px;min-width:32px;padding:0;display:inline-grid;place-items:center}
+.qbtn svg,.icon-btn svg,.rail-btn svg,.tbtn svg,.zoom-pill button svg,.tool-pair button svg,.rbtn svg,.mini-btn svg,.ctx-item svg,.tab svg{width:18px;height:18px;display:block;flex:none;color:currentColor;fill:none;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;overflow:visible}
+.rbtn svg{width:20px;height:20px}
+.ribbon{background:var(--surface);border-bottom:1px solid var(--border)}
+.rbtn,.mini-btn{min-width:36px;border-radius:8px}
+.rbtn.active,.qbtn.active,.rail-btn.active,.tool-pair button.active{box-shadow:inset 0 -2px 0 var(--accent)}
+.rail,.sidebar,.context,.statusbar,.titlebar,.menubar{background:var(--surface)}
+.side-head,.ctx-head{font-weight:600;border-bottom:1px solid var(--border)}
+.zoom-pill{background:var(--surface-sunken);border:1px solid var(--border);border-radius:8px}
+button.primary{background:var(--accent-solid);color:var(--accent-text);border-color:transparent;font-weight:600}
+button.primary:not(:disabled):hover{background:var(--accent-solid-hover)}
+button.ghost{background:var(--surface);border-color:var(--border-strong)}
+.welcome,.empty-workspace{background:var(--desk)}
+.ew-card,.welcome-inner{background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--elev-2)}
+.chip,#aiChip{border:1px solid var(--accent-line);background:var(--accent-soft);color:var(--accent-ink);border-radius:999px;font-weight:600}
+.mode-tab.active{box-shadow:inset 0 -2px 0 var(--accent)}
+@media (prefers-reduced-motion:reduce){.icon-btn,.qbtn,.rbtn,.mode-tab,.tab{transition:none}}
